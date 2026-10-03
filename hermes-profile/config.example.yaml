@@ -1,0 +1,20 @@
+# Add to a dedicated Hermes profile (e.g. `hermes profile create discord-voice`), then merge into
+# ~/.hermes/profiles/discord-voice/config.yaml. Keep the profile narrow: only the Discord tools.
+model:
+  default: your-fast-model        # a fast, capable chat model
+  reasoning_effort: medium
+agent:
+  max_turns: 12
+memory:
+  enabled: false
+tools:
+  tool_search:
+    enabled: 'off'                # load the Discord tools up front; deferred tools cost a round trip
+platform_toolsets:
+  api_server: [discord-voice]
+mcp_servers:
+  discord-voice:
+    command: node
+    args: [/path/to/discord-voice-control/src/mcp.mjs]
+    env:
+      DVC_GUILD: "YOUR_GUILD_ID"

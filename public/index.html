@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Discord voice</title>
+<style>
+  [hidden] { display: none !important; }
+  body { font: 17px/1.4 system-ui, sans-serif; margin: 0; background: #111318; color: #e8e8ec; }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 120px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: #9aa0ab; font-size: 14px; margin-bottom: 18px; }
+  button { font: inherit; border: 0; border-radius: 999px; padding: 14px 22px; cursor: pointer; }
+  #talk { width: 100%; font-size: 20px; background: #5865f2; color: #fff; padding: 20px; }
+  #talk.on { background: #da373c; }
+  #status { margin: 12px 0; color: #9aa0ab; min-height: 1.4em; }
+  #confirm { background: #2b2d31; border-radius: 14px; padding: 14px; margin: 12px 0; }
+  #confirm button { margin-right: 8px; }
+  .yes { background: #248046; color: #fff; } .no { background: #4e5058; color: #fff; }
+  #log { list-style: none; padding: 0; }
+  #log li { padding: 8px 12px; border-radius: 12px; margin: 6px 0; background: #1e1f24; }
+  #log li.heard { background: #2b2d31; text-align: right; }
+  #log li.write { border-left: 3px solid #248046; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  input { flex: 1; font: inherit; padding: 12px; border-radius: 12px; border: 1px solid #3a3c42; background: #1e1f24; color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Discord voice</h1>
+  <div class="sub">GPT-Live voice · reads your server · asks before posting · cannot delete</div>
+
+  <form id="login" hidden>
+    <input id="code" type="password" placeholder="Access code" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+  </form>
+
+  <section id="app" hidden>
+    <button id="talk">Start talking</button>
+    <div id="status" role="status"></div>
+    <div id="confirm" hidden>
+      <div id="confirm-text">Waiting for your yes.</div>
+      <p><button class="yes" id="yes">Yes, do it</button><button class="no" id="no">Cancel</button></p>
+    </div>
+    <form id="typed">
+      <input id="say" placeholder="Or type a request">
+      <button type="submit">Send</button>
+    </form>
+    <ul id="log"></ul>
+  </section>
+</main>
+<script src="/app.js" type="module"></script>
+</body>
+</html>
