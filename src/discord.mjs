@@ -110,6 +110,11 @@ export function createDiscord({ fetchImpl = fetch, token = null } = {}) {
         at: m.timestamp,
         replyTo: m.referenced_message ? (m.referenced_message.author?.global_name || m.referenced_message.author?.username) : undefined,
         text: (m.content || (m.embeds?.length ? `[embed] ${m.embeds[0].title || m.embeds[0].description || ""}` : m.attachments?.length ? "[attachment]" : "")).slice(0, 900),
+        url: `https://discord.com/channels/${GUILD}/${id}/${m.id}`,
+        media: [
+          ...(m.attachments || []).map((a) => ({ kind: /^video/.test(a.content_type || "") ? "video" : /^image/.test(a.content_type || "") ? "image" : "file", url: a.url, name: a.filename })),
+          ...(m.embeds || []).filter((e) => e.image?.url || e.thumbnail?.url || e.video?.url).map((e) => ({ kind: e.video?.url ? "video" : "image", url: e.video?.url || e.image?.url || e.thumbnail?.url, name: e.title || "" })),
+        ].slice(0, 4),
       }));
     },
     async pins(id) {
@@ -212,7 +217,9 @@ export function createDiscord({ fetchImpl = fetch, token = null } = {}) {
         method: "POST",
         headers: { "Content-Type": "application/json", "User-Agent": "DiscordBot (discord-voice-control, 0.1)" },
         body: JSON.stringify({
-          content: content || name, username: me.name, avatar_url: me.avatar, allowed_mentions: { parse: [] },
+          // Mentioning the owner adds them to the thread, so it shows in their sidebar and notifies.
+          content: OWNER ? `${content || name}\n\n<@${OWNER}>` : content || name,
+          username: me.name, avatar_url: me.avatar, allowed_mentions: { users: OWNER ? [OWNER] : [] },
           ...(parent.kind === "forum" ? { thread_name: name.slice(0, 100) } : {}),
         }),
         signal: AbortSignal.timeout(20_000),
@@ -226,8 +233,9 @@ export function createDiscord({ fetchImpl = fetch, token = null } = {}) {
         threadId = t.id;
       }
       cache = null;
+      if (OWNER && parent.kind !== "forum") await call("PUT", `/channels/${threadId}/thread-members/${OWNER}`).catch(() => {});
       lastAction = { kind: "thread", threadId, starter: { hookId: hook.id, token: hook.token, messageId: m.id, threadId: parent.kind === "forum" ? threadId : null } };
-      return { threadId };
+      return { threadId, messageId: m.id };
     },
     async rename(id, name) {
       const before = (await this.get(id))?.name;

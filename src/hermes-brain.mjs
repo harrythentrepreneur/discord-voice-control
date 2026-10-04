@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { classifyConfirmation } from "./brain.mjs";
-import { PENDING_FILE } from "./mcp.mjs";
+import { PENDING_FILE, appendLedger, removeFromLedger, readLedger } from "./mcp.mjs";
 
 const PROFILE = process.env.DVC_PROFILE || "discord-voice";
 const BASE = process.env.DVC_HERMES_URL || "http://127.0.0.1:8642";
@@ -57,7 +57,7 @@ function withHermesLock(fn) {
   return run;
 }
 
-export function createHermesBrain({ discord, ask = askHermes, pendingFile = PENDING_FILE, log = () => {}, confirm = CONFIRM }) {
+export function createHermesBrain({ discord, ask = askHermes, pendingFile = PENDING_FILE, log = () => {}, confirm = CONFIRM, ledgerFile }) {
   let sessionId = null;
   let pending = null;
 
@@ -71,7 +71,30 @@ export function createHermesBrain({ discord, ask = askHermes, pendingFile = PEND
     }
   };
 
+  // Same room + near-identical text within 60 s = a duplicate (a mis-heard repeat), not a new post.
+  const normText = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  function isDuplicate(a) {
+    const x = a.args || {};
+    const t = normText(x.content);
+    return readLedger(ledgerFile).some((e) => e.channelId === x.channel_id && Date.now() - Date.parse(e.at) < 60e3 &&
+      (normText(e.text) === t || (t.length > 20 && (normText(e.text).includes(t) || t.includes(normText(e.text))))));
+  }
+
   async function execute(a) {
+    const x = a.args;
+    if ((a.tool === "post_message" || a.tool === "create_thread") && isDuplicate(a)) {
+      const e = new Error("duplicate"); e.duplicate = true; throw e;
+    }
+    const r = await executeRaw(a);
+    const where = /^(?:Post|Reply|Start "[^"]*") in (.+?)(?::|, opening)/.exec(a.summary || "")?.[1] || "";
+    if (a.tool === "post_message" && r?.messageId)
+      appendLedger({ kind: "post", channelId: x.channel_id, messageId: r.messageId, room: where, text: x.content }, ledgerFile);
+    if (a.tool === "create_thread" && r?.threadId)
+      appendLedger({ kind: "thread", channelId: r.threadId, messageId: r.messageId || r.threadId, room: where, title: x.name, text: x.content }, ledgerFile);
+    return r;
+  }
+
+  async function executeRaw(a) {
     const x = a.args;
     switch (a.tool) {
       case "post_message": return discord.post(x.channel_id, x.content, x.reply_to_message_id);
@@ -98,6 +121,10 @@ export function createHermesBrain({ discord, ask = askHermes, pendingFile = PEND
       note(`[app] Done: ${a.summary}`);
       return { say: confirm ? DONE[a.tool] || "Done." : doneText(a), action: { ...a, status: "done" } };
     } catch (e) {
+      if (e.duplicate) {
+        note(`[app] Not sent again: the same message went to that room seconds ago. ${a.summary}`);
+        return { say: "I already sent that a moment ago, so I didn't post it twice.", action: { ...a, status: "duplicate" } };
+      }
       return { say: `That failed. Discord said ${e.status || "an error"}. Nothing else was changed.`, action: { ...a, status: "failed" } };
     }
   }
@@ -113,7 +140,10 @@ export function createHermesBrain({ discord, ask = askHermes, pendingFile = PEND
     if (!text) return { say: "I didn't catch that." };
     if (UNDO.test(text) && !pending) {
       try {
+        const before = discord.lastAction;
         const u = await discord.deleteLast();
+        const gone = before?.messageId || before?.starter?.messageId;
+        if (gone) removeFromLedger(gone, ledgerFile);
         const what = { post: "took that post down", thread: "deleted that thread", react: "removed that reaction", pin: "unpinned it", rename: "changed the name back", channel: "deleted that channel" }[u?.undone] || "took that post down";
         log({ type: "write", tool: "undo", undone: u?.undone });
         note(`[app] the user said undo; ${what}.`);

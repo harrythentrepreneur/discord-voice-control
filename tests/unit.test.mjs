@@ -400,3 +400,129 @@ test("follow-ups right after an answer, and yes/no to a draft, always get throug
   assert.equal(classifyTurn("I broke a glass", { followUp: true }).accept, false);
   assert.equal(classifyTurn("why do the voice app and the website chat give different answers?").accept, true);
 });
+
+test("V2: recent_activity works when called unbound (the bug that broke catch-up all day)", async () => {
+  const { createHandlers } = await import("../src/mcp.mjs");
+  const d = fakeDiscord();
+  d.readMessages = async () => [{ author: "omo", at: "2026-10-04T00:00:00Z", text: "hi", url: "u" }];
+  const h = createHandlers(d, "/tmp/dvc-x.json");
+  const fn = h.recent_activity; // unbound, exactly as the MCP dispatcher calls it
+  const r = await fn({ limit: 2 });
+  assert.ok(Array.isArray(r));
+});
+
+test("V2: posts land in the ledger, a repeat within 60s is not posted twice, undo removes it", async () => {
+  const { createHermesBrain } = await import("../src/hermes-brain.mjs");
+  const { readLedger } = await import("../src/mcp.mjs");
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const pf = `${os.tmpdir()}/dvc-v2-pend-${process.pid}.json`;
+  const lf = `${os.tmpdir()}/dvc-v2-ledger-${process.pid}.json`;
+  try { fsm.unlinkSync(lf); } catch {}
+  const d = fakeDiscord();
+  let n = 0;
+  d.post = async (id, text) => { d.writes.push(["post", id, text]); return { messageId: `m${++n}` }; };
+  d.lastAction = null;
+  d.deleteLast = async () => ({ undone: "post" });
+  const ask = async () => { fsm.writeFileSync(pf, JSON.stringify({ tool: "post_message", args: { channel_id: "2", content: "Any new signups?" }, summary: 'Post in thread "usage" in #sales: "Any new signups?". Send it?' })); return { say: "", sessionId: "s" }; };
+  const b = createHermesBrain({ discord: d, ask, pendingFile: pf, confirm: false, ledgerFile: lf });
+  b.reset();
+  await b.handle("post any new signups in usage");
+  assert.equal(readLedger(lf).length, 1);
+  assert.equal(readLedger(lf)[0].room, 'thread "usage" in #sales');
+  const r2 = await b.handle("post any new signups in usage");
+  assert.equal(d.writes.length, 1, "duplicate blocked");
+  assert.match(r2.say, /already sent that/);
+  d.lastAction = { kind: "post", messageId: "m1" };
+  await b.handle("undo");
+  assert.equal(readLedger(lf).length, 0, "undo removes it from the ledger");
+});
+
+test("V2: watcher raises one update per new reply, skips our own webhook posts, never repeats", async () => {
+  const { createWatcher, spokenUpdate } = await import("../src/watcher.mjs");
+  const { appendLedger } = await import("../src/mcp.mjs");
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const lf = `${os.tmpdir()}/dvc-v2-wl-${process.pid}.json`;
+  const sf = `${os.tmpdir()}/dvc-v2-ws-${process.pid}.json`;
+  for (const f of [lf, sf]) try { fsm.unlinkSync(f); } catch {}
+  appendLedger({ kind: "post", channelId: "9", messageId: "100", room: 'thread "usage" in #baker', text: "Any new signups?" }, lf);
+  let replies = [{ id: "101", webhook_id: "w", content: "my own post", timestamp: "t", author: { username: "Harry" } }, { id: "102", content: "Done: two new signups, Juan and Danielle.", timestamp: "t", author: { username: "omo" } }];
+  const d = { call: async () => replies };
+  const got = [];
+  const w = createWatcher({ discord: d, ledgerFile: lf, stateFile: sf, onUpdate: (u) => got.push(u) });
+  await w.tick();
+  assert.equal(got.length, 1);
+  assert.equal(got[0].author, "omo");
+  assert.equal(got[0].done, true);
+  replies = [];
+  await w.tick();
+  assert.equal(got.length, 1, "no repeat");
+  assert.match(spokenUpdate(got[0]), /^Update in usage: omo says it's done\. Done: two new signups/);
+});
+
+test("V2: answers carry their Discord sources (room, link, media) for the phone cards", async () => {
+  const { sourcesFrom } = await import("../src/direct-brain.mjs");
+  const cards = sourcesFrom("read_room", { room: "#general", messages: [{ author: "omo", at: "t", text: "video ready", url: "https://discord.com/channels/g/c/m", media: [{ kind: "video", url: "https://cdn/x.mp4" }] }] });
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].url, "https://discord.com/channels/g/c/m");
+  assert.equal(cards[0].media[0].kind, "video");
+});
+
+test("V2: a message with a video is shown as a card even if it is not among the newest three", async () => {
+  const { sourcesFrom } = await import("../src/direct-brain.mjs");
+  const msgs = [{ author: "omo", at: "t", text: "v5 cut", url: "u0", media: [{ kind: "video", url: "x.mp4" }] }, ...[1, 2, 3, 4].map((i) => ({ author: "omo", at: "t", text: `log ${i}`, url: `u${i}` }))];
+  const cards = sourcesFrom("read_room", { room: "#vid", messages: msgs });
+  assert.ok(cards.some((c) => c.media?.[0]?.kind === "video"));
+});
+
+test("V2: watcher never replays history for requests made before it started", async () => {
+  const { createWatcher } = await import("../src/watcher.mjs");
+  const { appendLedger } = await import("../src/mcp.mjs");
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const lf = `${os.tmpdir()}/dvc-v2-old-${process.pid}.json`;
+  const sf = `${os.tmpdir()}/dvc-v2-olds-${process.pid}.json`;
+  for (const f of [lf, sf]) try { fsm.unlinkSync(f); } catch {}
+  appendLedger({ kind: "post", channelId: "9", messageId: "100", room: "#x", text: "old ask", at: new Date(Date.now() - 3600e3).toISOString() }, lf);
+  let page = [{ id: "105", content: "old reply", timestamp: "t", author: { username: "omo" } }];
+  const d = { call: async (m, url) => (/limit=1(?!\d)/.test(url) ? page.slice(-1) : page.filter((x) => BigInt(x.id) > BigInt(/after=(\d+)/.exec(url)?.[1] || 0))) };
+  const got = [];
+  const w = createWatcher({ discord: d, ledgerFile: lf, stateFile: sf, onUpdate: (u) => got.push(u) });
+  await w.tick(); await w.tick();
+  assert.equal(got.length, 0, "old replies are not news");
+  page.push({ id: "106", content: "Finished the audit.", timestamp: "t", author: { username: "omo" } });
+  await w.tick();
+  assert.equal(got.length, 1);
+  assert.equal(got[0].text, "Finished the audit.");
+});
+
+test("V2: agent heartbeat lines are not live updates", async () => {
+  const { createWatcher } = await import("../src/watcher.mjs");
+  const { appendLedger } = await import("../src/mcp.mjs");
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const lf = `${os.tmpdir()}/dvc-v2-hb-${process.pid}.json`, sf = `${os.tmpdir()}/dvc-v2-hbs-${process.pid}.json`;
+  for (const f of [lf, sf]) try { fsm.unlinkSync(f); } catch {}
+  appendLedger({ kind: "post", channelId: "9", messageId: "100", room: "#x", text: "ask" }, lf);
+  const msgs = [{ id: "101", content: "⏩ Picked up in the current run, iteration 38/800", timestamp: "t", author: { username: "omo" } }, { id: "102", content: "Finished the audit.", timestamp: "t", author: { username: "omo" } }];
+  const got = [];
+  await createWatcher({ discord: { call: async () => msgs }, ledgerFile: lf, stateFile: sf, onUpdate: (u) => got.push(u) }).tick();
+  assert.deepEqual(got.map((u) => u.text), ["Finished the audit."]);
+});
+
+test("V2: request status is honest (working vs replied vs done) and phone text has no terminal noise", async () => {
+  const { isProgress, cleanForPhone } = await import("../src/mcp.mjs");
+  assert.ok(isProgress("⏳ Working — 6 min — iteration 21/800, terminal"));
+  assert.ok(isProgress("📚 Reading skill whatsapp-ad-conversion-optimisation"));
+  assert.ok(!isProgress("RapidWorksheet was paused on 30 Sep."));
+  const t = cleanForPhone("Here is the plan.\n```\ncd /home/harry/x\n```\n(×2)\n📚 Reading skill baker\nsaved to /home/harry/.hermes/a.json ok");
+  assert.ok(!/```|\/home\/|Reading skill|×2/.test(t), t);
+  assert.match(t, /Here is the plan\./);
+});
+
+test("V2: every agent progress style is noise, real sentences are not", async () => {
+  const { isProgress } = await import("../src/mcp.mjs");
+  for (const t of ["✍️ Writing", "🔀 Delegating list  📖 Reading STATUS.md", "> 💭 **Reasoning:** > The busy leases", "📖 Reading STATUS.md"]) assert.ok(isProgress(t), t);
+  for (const t of ["No new users, chats or signups since my 11:16 update.", "I agree, \"Hey Baker!\" is probably the wrong message.", "✅ Merged and verified."]) assert.ok(!isProgress(t), t);
+});

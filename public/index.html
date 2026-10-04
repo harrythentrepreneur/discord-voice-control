@@ -38,9 +38,13 @@
         <div class="conn" id="conn"><i></i><span>Ready</span></div>
       </div>
     </div>
+    <button type="button" class="icon-btn" id="open-requests" aria-label="Your requests">
+      <svg viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2"/></svg>
+      <b id="req-count" hidden></b>
+    </button>
     <div class="seg" role="radiogroup" aria-label="Which brain answers">
-      <button type="button" role="radio" data-brain="A" aria-checked="true">Hermes</button>
-      <button type="button" role="radio" data-brain="B" aria-checked="false">Direct</button>
+      <button type="button" role="radio" data-brain="B" aria-checked="true">Direct</button>
+      <button type="button" role="radio" data-brain="A" aria-checked="false">Hermes</button>
     </div>
   </header>
 
@@ -116,6 +120,23 @@
         <button type="button" class="btn primary" id="yes">Send</button>
       </div>
     </div>
+  </div>
+
+  <!-- Your requests: everything this app sent, with live status -->
+  <div class="sheet" id="requests" hidden role="dialog" aria-labelledby="req-title">
+    <div class="sheet-card tall">
+      <div class="sheet-head">
+        <div><div class="sheet-label">Last 48 hours</div><h3 id="req-title">Your requests</h3></div>
+        <button type="button" class="icon-btn" id="close-requests" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+      </div>
+      <ol class="req-list" id="req-list"><li class="muted">Loading…</li></ol>
+    </div>
+  </div>
+
+  <!-- Call dropped: one tap to carry on, conversation kept -->
+  <div class="resume" id="resume" hidden>
+    <span id="resume-text">Call dropped.</span>
+    <button type="button" class="btn primary small" id="resume-btn">Resume</button>
   </div>
 
   <div class="toast" id="toast" role="status" hidden></div>

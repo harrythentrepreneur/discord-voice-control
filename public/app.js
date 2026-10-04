@@ -21,10 +21,40 @@ const ui = {
   waiting: 0, // requests in flight (typed or spoken)
   lastLog: [],
 };
-let brainMode = localStorage.dvcBrain || "A";
+// V2 default: Direct (fastest, shows sources). A saved explicit choice from v2 on is kept.
+if (!localStorage.dvcBrainV2) { localStorage.dvcBrain = "B"; localStorage.dvcBrainV2 = "1"; }
+let brainMode = localStorage.dvcBrain || "B";
 const DEVICE = localStorage.dvcDevice || (localStorage.dvcDevice = Math.random().toString(36).slice(2, 10));
 const callsSeen = new Set(JSON.parse(sessionStorage.dvcCalls || "[]")); // calls started on this device
 let canUndo = false;
+const seenUpdates = new Set();
+// Badge = live updates you haven't looked at yet (cleared when you open Your requests).
+let unseenUpdates = 0;
+const paintBadge = () => { const b = $("#req-count"); b.hidden = !unseenUpdates; b.textContent = unseenUpdates; };
+let firstRender = true;
+function chime() {
+  try {
+    const ctx = (window.__chime ||= new (window.AudioContext || window.webkitAudioContext)());
+    for (const [f, t] of [[880, 0], [1320, 0.12]]) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = f; o.connect(g); g.connect(ctx.destination);
+      g.gain.setValueAtTime(0.0001, ctx.currentTime + t);
+      g.gain.exponentialRampToValueAtTime(0.12, ctx.currentTime + t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + t + 0.35);
+      o.start(ctx.currentTime + t); o.stop(ctx.currentTime + t + 0.4);
+    }
+  } catch {}
+}
+function notifyUpdate(u) {
+  unseenUpdates++;
+  paintBadge();
+  if (!call) chime(); // during a call the voice says it instead
+  buzz([20, 60, 20]);
+  toast(`${u.needsYou ? "Needs you" : u.done ? "✓ Finished" : "New reply"} · ${u.author}: ${plain(u.text).slice(0, 80)}`, 5000);
+  refreshRequests(false);
+  if (document.visibilityState !== "visible" && "Notification" in window && Notification.permission === "granted")
+    try { new Notification(`${u.author} ${u.done ? "finished" : "replied"}`, { body: u.text.slice(0, 140), tag: u.id }); } catch {}
+}
 
 const STATE_TEXT = {
   idle: "",
@@ -67,6 +97,7 @@ function toast(text, ms = 2600) {
 }
 
 function buzz(ms = 12) {
+  if (Array.isArray(ms)) { try { navigator.vibrate?.(ms); } catch {} return; }
   try { navigator.vibrate?.(ms); } catch {}
 }
 
@@ -95,13 +126,84 @@ const nodes = new Map(); // key -> <li>
 let lastSig = "";
 let thinkingEl = null;
 
+// Minimal, safe markdown for Discord text: **bold**, `code`, list dashes and quotes. Builds DOM
+// nodes (never innerHTML), so message text can't inject markup.
+function md(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text || "").replace(/<@!?\d+>/g, "").replace(/^\s*>\s?replying to \S+\s*/m, "").split("\n");
+  lines.forEach((line, i) => {
+    line = line.replace(/^\s*[-*•]\s+/, "• ").replace(/^\s*>\s?/, "").replace(/^#+\s*/, "");
+    for (const part of line.split(/(\*\*[^*]+\*\*|`[^`]+`)/g)) {
+      if (!part) continue;
+      if (/^\*\*[^*]+\*\*$/.test(part)) { const b = document.createElement("b"); b.textContent = part.slice(2, -2); frag.append(b); }
+      else if (/^`[^`]+`$/.test(part)) { const c = document.createElement("code"); c.textContent = part.slice(1, -1); frag.append(c); }
+      else frag.append(part.replace(/\*\*|__/g, ""));
+    }
+    if (i < lines.length - 1) frag.append(document.createElement("br"));
+  });
+  return frag;
+}
+const plain = (t) => String(t || "").replace(/<@!?\d+>/g, "").replace(/^\s*>\s?replying to \S+\s*/m, "").replace(/\*\*|`|^\s*[-*•]\s+/gm, "").trim();
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+const ago = (iso) => {
+  const s = (Date.now() - Date.parse(iso)) / 1000;
+  return s < 60 ? "just now" : s < 3600 ? `${Math.round(s / 60)}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`;
+};
+function statusPill(st) {
+  const map = { "needs you": ["needs", "Needs you"], done: ["replied", "Done"], replied: ["replied", "Replied"], working: ["working", "Working"], deleted: ["gone", "Deleted"], unknown: ["gone", "Unknown"] };
+  const [cls, label] = map[st] || ["waiting", "Waiting"];
+  return el("span", "pill " + cls, label);
+}
+// "thread "X" in #chan" -> "X · #chan" so the distinguishing part (the thread) comes first.
+const shortRoom = (r) => String(r || "").replace(/^(?:thread|forum post|private thread) "([^"]+)" in (#\S+)$/, "$1 · $2");
+
+function sourceCard(c) {
+  const a = el("a", "src" + (c.request ? " req" : ""));
+  if (c.url) { a.href = c.url; a.target = "_blank"; a.rel = "noopener"; }
+  a.append(el("div", "src-room", shortRoom(c.room) || "Discord"));
+  const img = (c.media || []).find((m) => m.kind === "image");
+  const vid = (c.media || []).find((m) => m.kind === "video");
+  if (img || vid) {
+    const box = el("div", "src-media");
+    if (vid) { const v = el("video"); v.src = vid.url + (vid.url.includes("#") ? "" : "#t=0.5"); v.controls = true; v.playsInline = true; v.preload = "metadata"; box.append(v); }
+    else { const i = el("img"); i.src = img.url; i.loading = "lazy"; i.alt = img.name || ""; box.append(i); }
+    a.append(box);
+  }
+  if (c.text) { const t = el("div", "src-text"); t.append(md(c.text)); a.append(t); }
+  const foot = el("div", "src-foot");
+  foot.append(el("span", "", [c.author, c.at ? ago(c.at) : ""].filter(Boolean).join(" · ")));
+  if (c.url) foot.append(el("span", "src-open", "Open ↗"));
+  if (c.status) foot.append(statusPill(c.status));
+  a.append(foot);
+  return a;
+}
+
 function bubble(e) {
+  if (e.type === "update") {
+    const li = el("li", "msg bot update" + (e.done ? " finished" : ""));
+    const b = el("div", "bubble");
+    b.append(el("div", "upd-head", (e.needsYou ? "Needs your decision · " : e.done ? "✓ Finished · " : "New reply · ") + shortRoom(e.room)));
+    const body = el("div", "");
+    body.append(el("b", "", e.author + ": "));
+    body.append(md(e.text));
+    b.append(body);
+    if (e.request) b.append(el("div", "upd-req", `You asked: ${plain(e.request).slice(0, 110)}`));
+    if (e.url) { const open = el("a", "upd-open", "Open in Discord ↗"); open.href = e.url; open.target = "_blank"; open.rel = "noopener"; b.append(open); }
+    li.append(b);
+    return li;
+  }
   const li = document.createElement("li");
   const you = e.type === "heard";
   li.className = "msg " + (you ? "you" : "bot") + (e.action === "done" ? " done" : "") + (e.type === "error" ? " err" : "");
   const b = document.createElement("div");
   b.className = "bubble";
-  b.textContent = e.text;
+  if (e.type === "reply") b.append(md(e.text)); else b.textContent = e.text;
   li.append(b);
   const meta = document.createElement("div");
   meta.className = "meta";
@@ -125,6 +227,11 @@ function bubble(e) {
     meta.append(cp);
   }
   li.append(meta);
+  if (!you && e.sources?.length) {
+    const box = el("div", "sources");
+    for (const c of e.sources) box.append(sourceCard(c));
+    li.insertBefore(box, meta);
+  }
   return li;
 }
 
@@ -134,7 +241,13 @@ function render(state) {
   // Only this device's conversation: its calls and its typed requests. Other phones' calls and
   // answers that were replaced by a newer question (never spoken) are left out.
   const mine = (e) => (e.call ? callsSeen.has(e.call) : e.device ? e.device === DEVICE : !!e.local);
-  const items = state.log.filter((e) => ["heard", "reply", "error"].includes(e.type) && !e.skipped && mine(e));
+  const items = state.log.filter((e) => (["heard", "reply", "error"].includes(e.type) && !e.skipped && mine(e)) || e.type === "update");
+  // New live updates: chime + toast + badge, once each.
+  for (const u of items.filter((e) => e.type === "update" && !seenUpdates.has(e.id))) {
+    seenUpdates.add(u.id);
+    if (!firstRender) notifyUpdate(u);
+  }
+  firstRender = false;
   if (typeof state.canUndo === "boolean") canUndo = state.canUndo;
   const keys = keysFor(items);
   const sig = keys.join("\n") + `|w${ui.waiting > 0}|p${!!state.pending}|u${canUndo}`;
@@ -313,6 +426,7 @@ async function start() {
       // prompt forbids it. Anything it says between a delegation and our answer is filler,
       // so mute the voice for exactly that window.
       if (d.type === "delegation.created") { hush(c, true); setMode("thinking"); }
+      if (/^(input_transcript|output_transcript|turn\.)/.test(d.type)) c.lastSpeech = Date.now();
       if (d.type === "turn.done" && d.turn?.role === "assistant") (window.__said ||= []).push([Date.now(), d.turn.transcript, !!c.hushed]);
       c.queue.push(d);
     } catch {}
@@ -325,7 +439,13 @@ async function start() {
     try {
       const r = await api("/api/relay", { events: batch, callId: c.id });
       if (r.appends?.length) { hush(c, false); if (ui.mode === "thinking") setMode("listening"); }
-      for (const a of r.appends || []) if (dc.readyState === "open") dc.send(JSON.stringify(a));
+      for (const a of r.appends || []) {
+        // A live update waits until nobody is talking, so it never cuts into an answer.
+        if (a.type === "session.context.append") { c.announces = [...(c.announces || []), a]; continue; }
+        if (dc.readyState === "open") dc.send(JSON.stringify(a));
+      }
+      if (c.announces?.length && ui.mode === "listening" && !c.hushed && Date.now() - (c.lastSpeech || 0) > 2500 && dc.readyState === "open")
+        dc.send(JSON.stringify(c.announces.shift()));
       render(r);
     } catch (err) {
       if (err.status === 409) return stop("Call ended. Tap to talk again.");
@@ -354,7 +474,7 @@ async function start() {
   }
 }
 
-function stop(msg) {
+let stop = function (msg) {
   if (call) report("call-stopped", msg || "user");
   const c = call;
   call = null;
@@ -372,7 +492,7 @@ function stop(msg) {
   setMode("idle");
   setHeard(msg || "");
   if (msg) buzz(30);
-}
+};
 
 function toggleMute() {
   if (!call) return;
@@ -411,7 +531,7 @@ async function ask(text, path = "/api/ask") {
   }
 }
 
-$("#talk").onclick = () => (call ? stop() : start());
+$("#talk").onclick = () => { $("#resume").hidden = true; return call ? stop() : start(); };
 $("#mute").onclick = toggleMute;
 $("#undo").onclick = () => ask("undo", "/api/undo");
 $("#yes").onclick = async () => render(await api("/api/confirm", { yes: true, callId: call?.id }));
@@ -486,3 +606,58 @@ setInterval(async () => {
   if (call || document.visibilityState !== "visible" || $("#app").hidden || ui.waiting) return;
   try { render(await api("/api/state")); } catch {}
 }, 10000);
+
+
+/* ---------- V2: Your requests ---------- */
+
+async function refreshRequests(render = true) {
+  try {
+    const r = await api("/api/requests");
+    if (!render) return;
+    const ol = $("#req-list");
+    ol.innerHTML = "";
+    if (!r.items.length) ol.append(el("li", "muted", "Nothing sent from the voice app in the last 48 hours."));
+    for (const x of r.items) {
+      const li = el("li");
+      const a = el("a", "req");
+      a.href = x.url; a.target = "_blank"; a.rel = "noopener";
+      const top = el("div", "req-top");
+      top.append(el("span", "req-room", shortRoom(x.room) || "Discord"));
+      top.append(statusPill(x.status));
+      a.append(top);
+      a.append(el("div", "req-text", (x.title ? `${x.title}: ` : "") + plain(x.text)));
+      const last = x.replies?.at?.(-1);
+      if (last) { const r = el("div", "req-reply"); r.append(el("b", "", last.author + ": ")); r.append(md(last.text)); a.append(r); }
+      a.append(el("div", "req-top", `Asked ${ago(x.at)}` + (x.lastActivity ? ` · updated ${ago(x.lastActivity)}` : "")));
+      li.append(a);
+      ol.append(li);
+    }
+  } catch {
+    if (render) $("#req-list").innerHTML = '<li class="muted">Could not load requests.</li>';
+  }
+}
+$("#open-requests").onclick = () => {
+  buzz();
+  $("#requests").hidden = false;
+  unseenUpdates = 0;
+  paintBadge();
+  refreshRequests(true);
+  // Ask once for notifications so finished work can alert with the screen off (where supported).
+  if ("Notification" in window && Notification.permission === "default") Notification.requestPermission().catch(() => {});
+};
+$("#close-requests").onclick = () => ($("#requests").hidden = true);
+$("#requests").onclick = (e) => { if (e.target.id === "requests") $("#requests").hidden = true; };
+setInterval(() => { if (!$("#app").hidden && document.visibilityState === "visible") refreshRequests(!$("#requests").hidden); }, 30000);
+setTimeout(() => refreshRequests(false), 1500);
+
+/* ---------- V2: resume a dropped call ---------- */
+let lastStopWasDrop = false;
+const _stop = stop;
+stop = function (msg) {
+  const drop = !!call && !!msg && /lost|ended|stopped/i.test(msg);
+  _stop(msg);
+  lastStopWasDrop = drop;
+  $("#resume").hidden = !drop;
+  if (drop) $("#resume-text").textContent = "Call dropped. Your conversation is kept.";
+};
+$("#resume-btn").onclick = () => { $("#resume").hidden = true; start(); };

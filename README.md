@@ -1,5 +1,9 @@
 # Discord Voice Control
 
+> **V2:** a hands-free operator console for an agent-run Discord. Catch up, delegate, and track what
+> you asked for, by voice, with the actual messages and media on screen and live updates when work
+> finishes. See [`docs/V2-AUDIT.md`](docs/V2-AUDIT.md) for the log audit behind it.
+
 Talk to your Discord server. Ask "what did I miss?", "what's happening in the support forum?",
 or "post in general: shipping the fix tonight", and hear the answer spoken back in a natural voice
 from your phone.
@@ -117,6 +121,21 @@ the access code.
 
 To keep it running, use a systemd user service (`ExecStart=/usr/bin/node /path/to/src/server.mjs`,
 `Restart=always`).
+
+## V2 features
+
+- **Your requests:** every post and thread the app made, with honest live status: *Working*,
+  *Needs you* (a decision is waiting), *Replied* or *Done*, plus the latest reply. Ask "did everything
+  go through?" and it answers in one call (`my_requests`).
+- **Live updates:** when someone or an agent replies to anything you sent, the phone chimes and shows
+  it, and during a call the voice tells you in one sentence (it waits until nobody is talking).
+  Progress noise from agents ("⏳ working… iteration 21/800") is filtered out.
+- **See what it's talking about:** every answer carries the Discord messages it used as tappable
+  cards (room, author, time, link), with images and videos inline.
+- **Memory across calls:** a dropped call doesn't lose the conversation; "that thread" still works.
+- **Threads you start are followed:** the opening post mentions you, so the thread shows in your
+  sidebar and notifies you.
+- **No double posts:** the same message to the same room within 60 seconds is sent once.
 
 ## The phone page
 

@@ -12,6 +12,7 @@ import { createBrain } from "./brain.mjs";
 import { createHermesBrain } from "./hermes-brain.mjs";
 import { createDirectBrain } from "./direct-brain.mjs";
 import { classifyTurn, askedToWrite } from "./intent.mjs";
+import { createWatcher, spokenUpdate } from "./watcher.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -80,7 +81,7 @@ export function accessCode() {
   return fs.readFileSync(f, "utf8").trim();
 }
 
-export function createApp({ discord = createDiscord(), brain, typedBrain, liveCall = createLiveCall, code = accessCode(), logFile = path.join(LOCAL, "calls.jsonl") } = {}) {
+export function createApp({ discord = createDiscord(), brain, typedBrain, liveCall = createLiveCall, code = accessCode(), logFile = path.join(LOCAL, "calls.jsonl"), watch = !!logFile } = {}) {
   const log = [];
   const push = (e) => {
     const entry = { at: new Date().toISOString(), ...e };
@@ -123,12 +124,21 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
   // device, a test) can never reset or feed events into a call already in progress.
   const calls = new Map(); // callId -> call
   // Split test: "A" = Hermes profile brain, "B" = direct model with the same tools and prompt.
+  // Live updates: replies to anything this app sent. Pushed to every live call (spoken) and returned
+  // to every page poll (toast, chime, badge).
+  const watcher = watch ? createWatcher({ discord, onUpdate: (u) => {
+    push({ type: "update", text: u.text, author: u.author, room: u.room, request: u.request, url: u.url, done: u.done, needsYou: u.needsYou, id: u.id });
+    for (const c of calls.values()) c.announce?.(spokenUpdate(u));
+  } }).start() : null;
+
+  // V2: one memory per device, shared by every call and typed request from that device.
+  const deviceMemory = new Map();
   const BRAINS = {
     A: () => createHermesBrain({ discord, log: (e) => push(e) }),
-    B: () => createDirectBrain({ discord, log: (e) => push(e) }),
+    B: () => createDirectBrain({ discord, log: (e) => push(e), memory: deviceMemory }),
     local: () => createBrain({ discord, log: (e) => push(e) }),
   };
-  const defaultMode = () => (process.env.DVC_BRAIN === "local" ? "local" : process.env.DVC_BRAIN === "direct" ? "B" : "A");
+  const defaultMode = () => (process.env.DVC_BRAIN === "local" ? "local" : process.env.DVC_BRAIN === "hermes" ? "A" : "B");
   const newBrain = (mode) => (BRAINS[mode] || BRAINS[defaultMode()])();
   let lastCall = null;
 
@@ -179,7 +189,13 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
       r = { say: e.safe || "Something went wrong reaching the Discord brain. Please try again." };
     }
     const stale = latestTurn && turnId !== latestTurn && !delegsByTurn.has(turnId);
-    push({ type: "reply", text: r.say, turn: turnId, call: callId, brain: mode, tool: r.action?.tool || null, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null, skipped: stale || undefined });
+    if (!r.say?.trim()) { // the brain judged it background talk: stay silent
+      push({ type: "ignored", text: said, turn: turnId, call: callId, reason: "brain: not a request" });
+      answers.set(turnId, "");
+      sendFor(turnId);
+      return;
+    }
+    push({ type: "reply", text: r.say, sources: r.sources?.length ? r.sources : undefined, turn: turnId, call: callId, brain: mode, tool: r.action?.tool || null, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null, skipped: stale || undefined });
     if (r.action?.status === "done") lastDone = r.action.tool === "undo" ? null : r.action.tool;
     if (stale) {
       push({ type: "status", text: "Answer skipped: you had already asked something newer.", turn: turnId, call: callId });
@@ -222,7 +238,12 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
     }
   }
 
-  return { brain, mode, relay, outbox, get chain() { return chain; }, get canUndo() { return !!lastDone; }, set lastDone(v) { lastDone = v; } };
+  // An update is sent to the phone as an "announce" item; the page asks GPT-Live to say it when
+  // nobody is talking (it never interrupts an answer in progress).
+  // Probed on the subscription route: session.context.append alone makes GPT-Live speak it
+  // (response.create is refused without Responses delegation).
+  const announce = (text) => outbox.push({ type: "session.context.append", content: [{ type: "input_text", text: `[Live update from the voice app] ${text} Tell the user this now in one short English sentence, then stop.` }] });
+  return { brain, mode, relay, outbox, announce, get chain() { return chain; }, get canUndo() { return !!lastDone; }, set lastDone(v) { lastDone = v; } };
   }
 
   const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png" };
@@ -263,6 +284,13 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
       }
       if (url.pathname.startsWith("/api/")) {
         if (url.pathname === "/api/session") return send(200, { authed: authed(req) });
+        if (url.pathname === "/api/requests" && authed(req)) {
+          try {
+            const { createHandlers } = await import("./mcp.mjs");
+            const items = await createHandlers(discord).my_requests({ hours: 48, limit: 25 });
+            return send(200, { items: items.map((x) => ({ ...x, url: `https://discord.com/channels/${process.env.DVC_GUILD || ""}/${x.channelId}/${x.messageId}` })) });
+          } catch (e) { return send(500, { error: "Could not read requests" }); }
+        }
         if (!authed(req)) return send(401, { error: "login required" });
         if (req.method === "POST" && url.pathname === "/api/offer") {
           const b = await body(req);
@@ -271,6 +299,7 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           const mode = ["A", "B", "local"].includes(b.brain) ? b.brain : defaultMode();
           const callBrain = injected ? brain : newBrain(mode);
           callBrain.reset?.();
+          callBrain.setDevice?.(b.device);
           const call = createCall(callBrain, mode, callId);
           calls.set(callId, call);
           lastCall = call;
@@ -293,6 +322,7 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           const call = calls.get(String(b.callId || ""));
           const mode = call?.mode || (["A", "B"].includes(b.brain) ? b.brain : defaultMode());
           const tb = call?.brain || typedFor(mode);
+          if (!call) tb.setDevice?.(b.device);
           const text = url.pathname === "/api/undo" ? "undo" : String(b.text || "").slice(0, 2000);
           const t0 = Date.now();
           let r;
@@ -303,7 +333,8 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           }
           const device = String(b.device || "").slice(0, 40) || undefined;
           push({ type: "heard", text, typed: true, brain: mode, device, call: call ? String(b.callId) : undefined });
-          push({ type: "reply", text: r.say, brain: mode, device, call: call ? String(b.callId) : undefined, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null, tool: r.action?.tool || null });
+          if (!r.say?.trim()) r.say = "I'm not sure that was meant for me. What would you like to know?";
+          push({ type: "reply", text: r.say, sources: r.sources?.length ? r.sources : undefined, brain: mode, device, call: call ? String(b.callId) : undefined, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null, tool: r.action?.tool || null });
           return send(200, { say: r.say, log: log.slice(-60), pending: !!tb.pending, canUndo: !!discord.lastAction });
         }
         if (req.method === "POST" && url.pathname === "/api/confirm") {

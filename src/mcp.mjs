@@ -20,6 +20,7 @@ export const TOOLS = [
   { name: "catch_up", description: "Same as recent_activity. ONE call for 'what's new / what did I miss / any updates': the most recently active rooms with their latest messages. Prefer this over recent_activity + read_room.", inputSchema: obj({ rooms: { type: "integer", minimum: 1, maximum: 6 }, per_room: { type: "integer", minimum: 3, maximum: 15 } }) },
   { name: "read_room", description: "Read messages in a room (oldest to newest) with ids. 'room' may be an id OR a spoken name like 'support queue' or 'team general chat' (best match is used). before_message_id pages back.", inputSchema: obj({ room: S, limit: { type: "integer", minimum: 1, maximum: 60 }, before_message_id: S }, ["room"]) },
   { name: "read_pins", description: "Pinned messages in a room.", inputSchema: obj({ room: S }, ["room"]) },
+  { name: "my_requests", description: "ONE call for 'did everything go through / what did we send / status of the things we made / any replies to my requests': every post and thread this voice app created, newest first, each with live status (replied / no reply yet) and the latest replies.", inputSchema: obj({ hours: { type: "integer", minimum: 1, maximum: 168 } }) },
   { name: "propose_post", description: "Propose posting as the user (optionally replying to a message id). Sent as the user as soon as this turn ends.", inputSchema: obj({ room: S, text: S, reply_to_message_id: S }, ["room", "text"]) },
   { name: "propose_thread", description: "Propose starting a thread / forum post with an opening message. Created as soon as this turn ends.", inputSchema: obj({ room: S, title: S, text: S }, ["room", "title", "text"]) },
   { name: "propose_react", description: "Propose an emoji reaction on a message. Done as soon as this turn ends.", inputSchema: obj({ room: S, message_id: S, emoji: S }, ["room", "message_id", "emoji"]) },
@@ -64,7 +65,7 @@ export function createHandlers(discord = createDiscord(), pendingFile = PENDING_
     return { status: "queued; the app sends it as soon as you finish this turn", instruction: "Reply with one short line only, e.g. 'Posting that now.' The app reports the real result." };
   }
   const this_room = room;
-  return {
+  const handlers = {
     async find_rooms({ query = "" }) {
       const list = await discord.channels();
       const words = String(query).toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1 && !STOP.has(w));
@@ -74,8 +75,10 @@ export function createHandlers(discord = createDiscord(), pendingFile = PENDING_
       });
       return rows.slice(0, 60).map(({ id, name, kind, parent, category, last }) => ({ id, name, kind, parent, category, lastActivity: last ? ts(last) : null }));
     },
+    // NOTE: never use `this` in handlers: the MCP dispatcher calls them unbound. It did, and
+    // recent_activity failed on every call all day ("reading 'catch_up'").
     async recent_activity({ limit = 4 }) {
-      return this.catch_up({ rooms: Math.min(5, limit), per_room: 8 });
+      return handlers.catch_up({ rooms: Math.min(5, limit), per_room: 8 });
     },
     async _recent_rooms({ limit = 12 }) {
       const list = await discord.channels();
@@ -88,7 +91,7 @@ export function createHandlers(discord = createDiscord(), pendingFile = PENDING_
       const out = await Promise.all(top.map(async (c) => {
         try {
           const msgs = await discord.readMessages(c.id, Math.min(15, per_room));
-          return { room: label(c), id: c.id, lastActivity: ts(c.last), messages: msgs.map(({ author, at, text }) => ({ author, at, text: text.slice(0, 700) })) };
+          return { room: label(c), id: c.id, lastActivity: ts(c.last), messages: msgs.map(({ author, at, text, url, media }) => ({ author, at, text: text.slice(0, 700), url, media: media?.length ? media : undefined })) };
         } catch (e) { return { room: label(c), error: `Discord ${e.status || "error"}` }; }
       }));
       return out;
@@ -100,7 +103,7 @@ export function createHandlers(discord = createDiscord(), pendingFile = PENDING_
           .sort((a, b) => (BigInt(b.last) > BigInt(a.last) ? 1 : -1)).slice(0, 6);
         return { room: label(c), note: "Forum: newest active posts with their latest messages.", posts: await Promise.all(posts.map(async (t) => ({
           post: t.name, id: t.id, lastActivity: ts(t.last),
-          messages: (await discord.readMessages(t.id, 6)).map(({ author, at, text }) => ({ author, at, text: text.slice(0, 600) })),
+          messages: (await discord.readMessages(t.id, 6)).map(({ author, at, text, url, media }) => ({ author, at, text: text.slice(0, 600), url, media: media?.length ? media : undefined })),
         }))) };
       }
       return { room: label(c), messages: await discord.readMessages(c.id, limit, before_message_id) };
@@ -133,7 +136,74 @@ export function createHandlers(discord = createDiscord(), pendingFile = PENDING_
     async propose_channel({ name, category, topic }) {
       return propose({ tool: "create_channel", args: { name, category, topic } }, `Create a channel called ${name}${category ? ` in ${category}` : ""}?`);
     },
+    // "Did everything go through? What's the status of the things we sent?" One call: every post and
+    // thread this app made (newest first), each checked live for replies since.
+    async my_requests({ hours = 24, limit = 12 }) {
+      const items = readLedger().filter((x) => Date.now() - Date.parse(x.at) < Math.min(168, hours) * 3600e3).slice(-Math.min(25, limit)).reverse();
+      return Promise.all(items.map(async (x) => {
+        try {
+          const after = await discord.call("GET", `/channels/${x.channelId}/messages?limit=10&after=${x.messageId}`);
+          const all = after.filter((m) => !m.webhook_id).reverse();
+          // Agent heartbeats ("⏳ Working… iteration 21/800", "📚 Reading skill …") mean "in progress",
+          // not "replied". Only real messages count as replies.
+          const isPing = (m) => isProgress(m.content);
+          const replies = all.filter((m) => !isPing(m));
+          const lastAny = all.at(-1);
+          // Honest status from the LATEST message: a ping or "next I'll…" = still working.
+          const status = !all.length ? "no reply yet"
+            : NEEDS_YOU.test(lastAny.content || "") ? "needs you"
+            : isPing(lastAny) || STILL_WORKING.test(lastAny.content || "") ? "working"
+            : DONE_WORDS.test(lastAny.content || "") ? "done" : "replied";
+          return { ...x, replies: undefined, url: `https://discord.com/channels/${GUILD_ID}/${x.channelId}/${x.messageId}`, status, lastActivity: all.at(-1)?.timestamp, replies: replies.slice(-3).map((m) => ({ author: m.member?.nick || m.author?.global_name || m.author?.username, at: m.timestamp, text: cleanForPhone(m.content).slice(0, 400) })).filter((r) => r.text) };
+        } catch (e) {
+          return { ...x, status: e.status === 404 ? "deleted" : "unknown" };
+        }
+      }));
+    },
   };
+  return handlers;
+}
+
+// The work ledger: every post/thread this app created. Small JSON file, newest last.
+const GUILD_ID = process.env.DVC_GUILD || "";
+// Agent progress noise vs real replies.
+export function isProgress(text) {
+  const t = String(text || "");
+  return (
+    // "✍️ Writing", "🔀 Delegating list", "📖 Reading STATUS.md", "⏳ Working — 6 min"
+    /^\s*(?:>\s*)?\p{Extended_Pictographic}\uFE0F?\s*(?:\*\*)?[A-Z][a-z]+ing\b/u.test(t) ||
+    /^\s*(?:>\s*)?(⏩|⏳|🔄|⚙️|💭)/u.test(t) ||
+    /\biteration \d+\s*(\/|of)\s*\d+/i.test(t) ||
+    /^\s*(reading skill|running|working —)\b/i.test(t) ||
+    /^\s*```/.test(t)
+  );
+}
+const STILL_WORKING = /\b(next,? i'?ll|now i'?ll|i'?ll (now |next )?(check|continue|look|start|run|create|build|write|post)|working on|in progress|continuing|still (checking|working|running))\b/i;
+// A decision block ("**If yes I will:**", "Decide:") means it is waiting on the owner.
+const NEEDS_YOU = /\*\*(decide|if yes i will)[:*]|^\s*decide:/im;
+const DONE_WORDS = /\b(done|finished|complete[d]?|ready for (you|review)|merged|shipped|fixed|is live|published|here'?s the (result|report|summary))\b/i;
+// Strip code blocks, paths and tool noise so a phone card shows words, not terminal output.
+export function cleanForPhone(text) {
+  return String(text || "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/(^|\s)\/(home|tmp|usr|var)\/\S+/g, "$1")
+    .split("\n").filter((l) => !isProgress(l) && !/^\s*\(×\d+\)/.test(l)).join("\n")
+    .replace(/\n{3,}/g, "\n\n").trim();
+}
+export const LEDGER_FILE = process.env.DVC_LEDGER_FILE || path.join(ROOT, ".local", "ledger.json");
+export function readLedger(file = LEDGER_FILE) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return []; }
+}
+export function appendLedger(entry, file = LEDGER_FILE) {
+  const all = readLedger(file);
+  all.push({ at: new Date().toISOString(), ...entry });
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file + ".tmp", JSON.stringify(all.slice(-300), null, 1));
+  fs.renameSync(file + ".tmp", file);
+}
+export function removeFromLedger(messageId, file = LEDGER_FILE) {
+  const all = readLedger(file).filter((x) => x.messageId !== messageId);
+  fs.writeFileSync(file, JSON.stringify(all, null, 1));
 }
 
 // --- JSON-RPC over stdio (MCP) ---
