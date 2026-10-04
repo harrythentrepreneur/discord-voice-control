@@ -137,7 +137,7 @@ export function createHandlers(discord = createDiscord(), pendingFile = PENDING_
 }
 
 // --- JSON-RPC over stdio (MCP) ---
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
+export function runStdio() {
   const handlers = createHandlers();
   const out = (msg) => process.stdout.write(JSON.stringify(msg) + "\n");
   const rl = readline.createInterface({ input: process.stdin });
@@ -167,3 +167,5 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
   });
 }
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) runStdio();

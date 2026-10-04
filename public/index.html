@@ -28,7 +28,7 @@
 <body>
 <main>
   <h1>Discord voice</h1>
-  <div class="sub">GPT-Live voice · reads your server · asks before posting · cannot delete</div>
+  <div class="sub">GPT-Live voice · reads your server · posts as you at once · say "undo" to reverse</div>
 
   <form id="login" hidden>
     <input id="code" type="password" placeholder="Access code" autocomplete="current-password">
@@ -36,6 +36,9 @@
   </form>
 
   <section id="app" hidden>
+    <label class="brain">Brain
+      <select id="brain"><option value="A">A · Hermes profile</option><option value="B">B · direct (no Hermes)</option></select>
+    </label>
     <button id="talk">Start talking</button>
     <div id="status" role="status"></div>
     <div id="confirm" hidden>

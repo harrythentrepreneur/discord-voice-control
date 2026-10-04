@@ -38,7 +38,8 @@ Phone (browser)  ──WebRTC audio──▶  GPT-Live (OpenAI realtime voice, y
    Two brains are included:
    - `hermes` (default): a dedicated [Hermes Agent](https://hermes-agent.nousresearch.com) profile
      whose only job is your Discord, given the tools through an MCP server (`src/mcp.mjs`).
-   - `local`: a ChatGPT text model called directly by the app, with the same tools.
+   - `direct`: a ChatGPT text model called by the app itself, with the **same** tools and the
+     same server prompt, no Hermes in the middle (`src/direct-brain.mjs`).
 4. **Writes** are proposed by the brain and executed by the app (not by the model), which also
    records how to undo them.
 
@@ -82,10 +83,22 @@ cp hermes-profile/SOUL.example.md ~/.hermes/profiles/discord-voice/SOUL.md     #
 
 Set `DVC_HERMES_URL`, `DVC_PROFILE` and `DVC_HERMES_KEY` (the profile's `API_SERVER_KEY`) in `.env`.
 
-### Brain option B: local
+### Brain option B: direct (no Hermes)
 
-Set `DVC_BRAIN=local` in `.env`. No Hermes needed; it uses your ChatGPT sign-in for a text model
-(`DVC_TEXT_MODEL`).
+Set `DVC_BRAIN=direct` in `.env`, or pick **B** in the Brain menu on the page. No Hermes needed; it
+uses your ChatGPT sign-in for a text model (`DVC_TEXT_MODEL`) and your server prompt from
+`.local/server-prompt.md` (falls back to `hermes-profile/SOUL.example.md`).
+
+### Split test A vs B
+
+The page has a **Brain** menu (A = Hermes profile, B = direct). It applies from the next call.
+Every answer is logged with its brain, time taken and length; compare them with:
+
+```bash
+node scripts/log-report.mjs 24
+# brain A: 12 answers, median 6.8s, slowest 14.2s, avg 160 words
+# brain B: 10 answers, median 6.9s, slowest 7.9s, avg 95 words
+```
 
 ### On your phone
 

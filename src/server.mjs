@@ -10,6 +10,7 @@ import { createLiveCall } from "./codex.mjs";
 import { createDiscord } from "./discord.mjs";
 import { createBrain } from "./brain.mjs";
 import { createHermesBrain } from "./hermes-brain.mjs";
+import { createDirectBrain } from "./direct-brain.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -93,12 +94,17 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
   // Every GPT-Live call owns its own brain session and event state. A second call (another
   // device, a test) can never reset or feed events into a call already in progress.
   const calls = new Map(); // callId -> call
-  const newBrain = () => process.env.DVC_BRAIN === "local"
-    ? createBrain({ discord, log: (e) => push(e) })
-    : createHermesBrain({ discord, log: (e) => push(e) });
+  // Split test: "A" = Hermes profile brain, "B" = direct model with the same tools and prompt.
+  const BRAINS = {
+    A: () => createHermesBrain({ discord, log: (e) => push(e) }),
+    B: () => createDirectBrain({ discord, log: (e) => push(e) }),
+    local: () => createBrain({ discord, log: (e) => push(e) }),
+  };
+  const defaultMode = () => (process.env.DVC_BRAIN === "local" ? "local" : process.env.DVC_BRAIN === "direct" ? "B" : "A");
+  const newBrain = (mode) => (BRAINS[mode] || BRAINS[defaultMode()])();
   let lastCall = null;
 
-  function createCall(callBrain) {
+  function createCall(callBrain, mode = "A") {
   const brain = callBrain;
   const seen = new Set();
   const outbox = [];
@@ -117,14 +123,15 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
   }
 
   async function onUserTurn(turnId, said) {
-    push({ type: "heard", text: said, turn: turnId });
+    push({ type: "heard", text: said, turn: turnId, brain: mode });
+    const t0 = Date.now();
     let r;
     try {
       r = await brain.handle(said);
     } catch (e) {
       r = { say: e.safe || "Something went wrong reaching the Discord brain. Please try again." };
     }
-    push({ type: "reply", text: r.say, turn: turnId, pending: r.pending?.summary || null, action: r.action?.status || null });
+    push({ type: "reply", text: r.say, turn: turnId, brain: mode, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null });
     if (latestTurn && turnId !== latestTurn && !delegsByTurn.has(turnId)) {
       push({ type: "status", text: "Answer skipped: you had already asked something newer.", turn: turnId });
       return;
@@ -208,13 +215,14 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           const b = await body(req);
           const r = await liveCall(b.sdp);
           const callId = crypto.randomUUID();
-          const callBrain = injected ? brain : newBrain();
+          const mode = ["A", "B", "local"].includes(b.brain) ? b.brain : defaultMode();
+          const callBrain = injected ? brain : newBrain(mode);
           callBrain.reset?.();
-          const call = createCall(callBrain);
+          const call = createCall(callBrain, mode);
           calls.set(callId, call);
           lastCall = call;
           while (calls.size > 6) calls.delete(calls.keys().next().value);
-          push({ type: "status", text: "Call started", call: callId.slice(0, 8) });
+          push({ type: "status", text: `Call started (brain ${mode})`, call: callId.slice(0, 8), brain: mode });
           return send(200, { sdp: r.sdp, callId });
         }
         if (req.method === "POST" && url.pathname === "/api/relay") {

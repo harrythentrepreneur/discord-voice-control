@@ -306,3 +306,25 @@ test("two calls never share state: a second call cannot reset or feed the first"
   assert.equal(c2.outbox[0].delegation_item_id, "d2");
   assert.equal(c2.outbox[0].content[0].text, "two:hi");
 });
+
+test("brain B (direct): same tools in-process, writes run at once, undo works, no Hermes", async () => {
+  const { createDirectBrain, DIRECT_TOOLS } = await import("../src/direct-brain.mjs");
+  const { TOOLS } = await import("../src/mcp.mjs");
+  assert.deepEqual(DIRECT_TOOLS.map((t) => t.name), TOOLS.map((t) => t.name), "B has exactly A's tools");
+  const d = fakeDiscord();
+  d.deleteLast = async () => ({ undone: "post" });
+  let n = 0;
+  const respond = async ({ tools }) => {
+    assert.ok(tools.find((t) => t.name === "propose_post"));
+    n++;
+    if (n === 1) return { text: "", calls: [{ call_id: "c1", name: "propose_post", arguments: JSON.stringify({ room: "general", text: "hello team" }) }] };
+    return { text: "Posting that now.", calls: [] };
+  };
+  const b = createDirectBrain({ discord: d, respond, confirm: false });
+  b.reset();
+  const r = await b.handle("post hello team in general");
+  assert.equal(d.writes.length, 1, "posted once, at once");
+  assert.equal(d.writes[0][2], "hello team");
+  assert.match(r.say, /^Posted/);
+  assert.match((await b.handle("undo")).say, /took that post down/);
+});

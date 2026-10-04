@@ -28,3 +28,17 @@ for (const e of rows.slice(-40)) {
   const what = e.type === "client" ? `[phone] ${e.kind} ${e.text || ""}` : e.type === "write" ? `[WRITE] ${e.tool} -> ${e.channel}` : `${e.type}: ${e.text || ""}`;
   console.log(` ${e.at.slice(11, 19)} ${what.replace(/\s+/g, " ").slice(0, 170)}`);
 }
+
+// Split test: speed and length per brain (replies tagged with brain + ms).
+{
+  const fs2 = await import("node:fs");
+  const rows = fs2.readFileSync(new URL("../.local/calls.jsonl", import.meta.url), "utf8").split("\n").filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } }).filter((e) => e && e.type === "reply" && e.brain && e.ms != null);
+  const by = {};
+  for (const e of rows) (by[e.brain] ||= []).push(e);
+  for (const [b, list] of Object.entries(by)) {
+    const ms = list.map((e) => e.ms).sort((x, y) => x - y);
+    const med = ms[Math.floor(ms.length / 2)];
+    const words = Math.round(list.reduce((n, e) => n + (e.words || 0), 0) / list.length);
+    console.log(`brain ${b}: ${list.length} answers, median ${(med / 1000).toFixed(1)}s, slowest ${(ms.at(-1) / 1000).toFixed(1)}s, avg ${words} words`);
+  }
+}

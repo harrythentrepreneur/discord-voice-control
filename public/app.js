@@ -139,7 +139,7 @@ async function start() {
   };
   try {
     await pc.setLocalDescription(await pc.createOffer());
-    const ans = await api("/api/offer", { sdp: pc.localDescription.sdp });
+    const ans = await api("/api/offer", { sdp: pc.localDescription.sdp, brain: localStorage.dvcBrain || "A" });
     if (call !== c) return;
     c.id = ans.callId;
     await pc.setRemoteDescription({ type: "answer", sdp: ans.sdp });
@@ -210,3 +210,14 @@ async function boot() {
   }
 }
 boot();
+
+// Split test switch: A = Hermes profile, B = direct model. Applies to the next call.
+(() => {
+  const sel = document.getElementById("brain");
+  if (!sel) return;
+  sel.value = localStorage.dvcBrain || "A";
+  sel.onchange = () => {
+    localStorage.dvcBrain = sel.value;
+    $("#status").textContent = `Brain ${sel.value} selected. Applies from the next call.`;
+  };
+})();
