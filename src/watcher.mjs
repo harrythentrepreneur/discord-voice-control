@@ -8,7 +8,9 @@ import { readLedger, LEDGER_FILE, isProgress, cleanForPhone } from "./mcp.mjs";
 
 const DONE = /\b(done|finished|complete[d]?|ready|merged|shipped|posted|fixed|live|deployed|sent|published|pushed|approved|resolved)\b/i;
 
-export function createWatcher({ discord, ledgerFile = LEDGER_FILE, stateFile, onUpdate = () => {}, everyMs = 30000, maxAgeH = 48, now = () => Date.now() } = {}) {
+export const NOTIFY_MARK = /^🔔/;
+
+export function createWatcher({ discord, ledgerFile = LEDGER_FILE, stateFile, onUpdate = () => {}, everyMs = 30000, maxAgeH = 48, now = () => Date.now(), ownerId = process.env.DVC_OWNER || "" } = {}) {
   const sf = stateFile || path.join(path.dirname(ledgerFile), "watch.json");
   let cursors = {};
   try { cursors = JSON.parse(fs.readFileSync(sf, "utf8")); } catch {}
@@ -43,13 +45,16 @@ export function createWatcher({ discord, ledgerFile = LEDGER_FILE, stateFile, on
         cursors[x.messageId] = msgs.at(-1).id;
         for (const m of msgs) {
           if (m.webhook_id) continue; // our own posts
+          if (ownerId && m.author?.id === ownerId) continue; // the owner's own messages are not news
+          if (NOTIFY_MARK.test(String(m.content || ""))) continue; // our own lock-screen pings
           const text = String(m.content || (m.embeds?.[0]?.title ?? "") || (m.attachments?.length ? "[attachment]" : "")).trim();
           if (!text) continue;
           // Agent heartbeats ("⏩ picked up in the current run… iteration 38/800") are progress noise,
           // not news. Only real replies become live updates.
           if (isProgress(text) || !cleanForPhone(text)) continue;
           const u = {
-            id: m.id, at: m.timestamp, room: x.room || "", request: (x.title || x.text || "").slice(0, 120),
+            id: m.id, channelId: x.channelId, mentionsOwner: !!ownerId && (m.mentions || []).some((u) => u.id === ownerId),
+            at: m.timestamp, room: x.room || "", request: (x.title || x.text || "").slice(0, 120),
             author: m.member?.nick || m.author?.global_name || m.author?.username || "someone",
             text: cleanForPhone(text).slice(0, 400), done: DONE.test(text),
             needsYou: /\*\*(decide|if yes i will)[:*]|^\s*decide:/im.test(text),
@@ -80,4 +85,30 @@ export function spokenUpdate(u) {
   const room = u.room ? ` in ${u.room.replace(/^thread "([^"]+)".*$/, "$1").replace(/^#/, "")}` : "";
   const gist = u.text.replace(/https?:\/\/\S+/g, "a link").replace(/[*_`>#]/g, "").split(/(?<=[.!?])\s/)[0].slice(0, 160);
   return `Update${room}: ${u.author} ${u.needsYou ? "needs a decision from you" : u.done ? "says it's done" : "replied"}. ${gist}`;
+}
+
+// Lock-screen notifications: for Done and Needs-you updates only, the bot replies to that message
+// with one short line mentioning the owner, so the Discord app notifies even with the phone locked.
+// Skipped when: the reply already mentions the owner, a voice call is live (they hear it), or the
+// same room was pinged in the last 2 minutes.
+export function createNotifier({ discord, ownerId = process.env.DVC_OWNER || "", isLive = () => false, now = () => Date.now(), log = () => {} } = {}) {
+  const lastByRoom = new Map();
+  return async function notify(u) {
+    if (!ownerId || !(u.done || u.needsYou)) return { sent: false, reason: "not done/needs-you" };
+    if (u.mentionsOwner) return { sent: false, reason: "already mentions owner" };
+    if (isLive()) return { sent: false, reason: "live call" };
+    if (now() - (lastByRoom.get(u.channelId) || 0) < 120e3) return { sent: false, reason: "rate limit" };
+    lastByRoom.set(u.channelId, now());
+    const gist = String(u.text).replace(/https?:\/\/\S+/g, "").replace(/[*_`>#]/g, "").split(/(?<=[.!?])\s/)[0].slice(0, 140);
+    const content = `🔔 <@${ownerId}> ${u.author} ${u.needsYou ? "needs a decision from you" : "finished"}: ${gist}`;
+    try {
+      const m = await discord.call("POST", `/channels/${u.channelId}/messages`, {
+        content, allowed_mentions: { users: [ownerId] }, message_reference: { message_id: u.id, fail_if_not_exists: false },
+      });
+      log({ type: "notify", channel: u.channelId, id: m?.id });
+      return { sent: true, id: m?.id };
+    } catch (e) {
+      return { sent: false, reason: `Discord ${e.status || "error"}` };
+    }
+  };
 }

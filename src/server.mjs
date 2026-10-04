@@ -12,7 +12,7 @@ import { createBrain } from "./brain.mjs";
 import { createHermesBrain } from "./hermes-brain.mjs";
 import { createDirectBrain } from "./direct-brain.mjs";
 import { classifyTurn, askedToWrite } from "./intent.mjs";
-import { createWatcher, spokenUpdate } from "./watcher.mjs";
+import { createWatcher, createNotifier, spokenUpdate } from "./watcher.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -126,9 +126,13 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
   // Split test: "A" = Hermes profile brain, "B" = direct model with the same tools and prompt.
   // Live updates: replies to anything this app sent. Pushed to every live call (spoken) and returned
   // to every page poll (toast, chime, badge).
+  // A call counts as live while its page keeps relaying (every 0.6 s); stale entries don't block pings.
+  const callIsLive = () => [...calls.values()].some((c) => Date.now() - (c.lastRelay || 0) < 15000);
+  const notify = createNotifier({ discord, isLive: callIsLive, log: (e) => push(e) });
   const watcher = watch ? createWatcher({ discord, onUpdate: (u) => {
     push({ type: "update", text: u.text, author: u.author, room: u.room, request: u.request, url: u.url, done: u.done, needsYou: u.needsYou, id: u.id });
     for (const c of calls.values()) c.announce?.(spokenUpdate(u));
+    notify(u).catch(() => {});
   } }).start() : null;
 
   // V2: one memory per device, shared by every call and typed request from that device.
@@ -311,6 +315,7 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           const b = await body(req);
           const call = calls.get(String(b.callId || ""));
           if (!call) return send(409, { error: "This call has ended. Tap Start talking again." });
+          call.lastRelay = Date.now();
           call.relay(Array.isArray(b.events) ? b.events.slice(0, 300) : []);
           if (b.wait) await call.chain;
           return send(200, { appends: call.outbox.splice(0), log: log.slice(-60), pending: call.brain.pending ? true : false, canUndo: !!discord.lastAction });

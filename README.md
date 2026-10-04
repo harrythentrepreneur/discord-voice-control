@@ -130,6 +130,10 @@ To keep it running, use a systemd user service (`ExecStart=/usr/bin/node /path/t
 - **Live updates:** when someone or an agent replies to anything you sent, the phone chimes and shows
   it, and during a call the voice tells you in one sentence (it waits until nobody is talking).
   Progress noise from agents ("⏳ working… iteration 21/800") is filtered out.
+- **Lock-screen pings:** when a request is *Done* or *Needs you* and no call is live, the bot replies
+  in that thread with one line that mentions you (`🔔 @you omo finished: …`), so the Discord app
+  notifies you even with the phone locked. At most one per room every 2 minutes; skipped when the
+  reply already mentions you. Set `DVC_OWNER` to your Discord user id to enable it.
 - **See what it's talking about:** every answer carries the Discord messages it used as tappable
   cards (room, author, time, link), with images and videos inline.
 - **Memory across calls:** a dropped call doesn't lose the conversation; "that thread" still works.

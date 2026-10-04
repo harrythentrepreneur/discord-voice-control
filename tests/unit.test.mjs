@@ -526,3 +526,41 @@ test("V2: every agent progress style is noise, real sentences are not", async ()
   for (const t of ["✍️ Writing", "🔀 Delegating list  📖 Reading STATUS.md", "> 💭 **Reasoning:** > The busy leases", "📖 Reading STATUS.md"]) assert.ok(isProgress(t), t);
   for (const t of ["No new users, chats or signups since my 11:16 update.", "I agree, \"Hey Baker!\" is probably the wrong message.", "✅ Merged and verified."]) assert.ok(!isProgress(t), t);
 });
+
+test("lock-screen ping: only Done/Needs-you, never twice per room in 2 min, not during a call, not if already mentioned", async () => {
+  const { createNotifier } = await import("../src/watcher.mjs");
+  const posts = [];
+  const discord = { call: async (m, url, body) => { posts.push({ url, body }); return { id: `n${posts.length}` }; } };
+  let live = false, t = 1e9;
+  const notify = createNotifier({ discord, ownerId: "42", isLive: () => live, now: () => t });
+  const u = (o) => ({ id: "m1", channelId: "c1", author: "omo", text: "Finished the audit. Details below.", done: true, ...o });
+  assert.equal((await notify(u({ done: false }))).sent, false, "plain reply: no ping");
+  assert.equal((await notify(u({ mentionsOwner: true }))).sent, false, "already mentioned");
+  live = true; assert.equal((await notify(u())).sent, false, "live call: voice says it"); live = false;
+  const r = await notify(u());
+  assert.equal(r.sent, true);
+  assert.match(posts[0].body.content, /^🔔 <@42> omo finished: Finished the audit\.$/);
+  assert.deepEqual(posts[0].body.allowed_mentions, { users: ["42"] });
+  assert.equal(posts[0].body.message_reference.message_id, "m1");
+  assert.equal((await notify(u({ id: "m2" }))).sent, false, "same room within 2 min");
+  t += 121e3; assert.equal((await notify(u({ id: "m3", done: false, needsYou: true }))).sent, true);
+  assert.match(posts[1].body.content, /needs a decision from you/);
+});
+
+test("watcher ignores its own pings and the owner's own messages (no loop)", async () => {
+  const { createWatcher } = await import("../src/watcher.mjs");
+  const { appendLedger } = await import("../src/mcp.mjs");
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const lf = `${os.tmpdir()}/dvc-n-l-${process.pid}.json`, sf = `${os.tmpdir()}/dvc-n-s-${process.pid}.json`;
+  for (const f of [lf, sf]) try { fsm.unlinkSync(f); } catch {}
+  appendLedger({ kind: "post", channelId: "9", messageId: "100", room: "#x", text: "ask" }, lf);
+  const msgs = [
+    { id: "101", content: "🔔 <@42> omo finished: x", timestamp: "t", author: { id: "7", username: "omo" } },
+    { id: "102", content: "thanks, looks good", timestamp: "t", author: { id: "42", username: "harry" } },
+    { id: "103", content: "Done.", timestamp: "t", author: { id: "7", username: "omo" } },
+  ];
+  const got = [];
+  await createWatcher({ discord: { call: async () => msgs }, ledgerFile: lf, stateFile: sf, ownerId: "42", onUpdate: (u) => got.push(u) }).tick();
+  assert.deepEqual(got.map((u) => u.id), ["103"]);
+});
