@@ -2,56 +2,125 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Discord voice</title>
-<style>
-  [hidden] { display: none !important; }
-  body { font: 17px/1.4 system-ui, sans-serif; margin: 0; background: #111318; color: #e8e8ec; }
-  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 120px; }
-  h1 { font-size: 20px; margin: 0 0 4px; }
-  .sub { color: #9aa0ab; font-size: 14px; margin-bottom: 18px; }
-  button { font: inherit; border: 0; border-radius: 999px; padding: 14px 22px; cursor: pointer; }
-  #talk { width: 100%; font-size: 20px; background: #5865f2; color: #fff; padding: 20px; }
-  #talk.on { background: #da373c; }
-  #status { margin: 12px 0; color: #9aa0ab; min-height: 1.4em; }
-  #confirm { background: #2b2d31; border-radius: 14px; padding: 14px; margin: 12px 0; }
-  #confirm button { margin-right: 8px; }
-  .yes { background: #248046; color: #fff; } .no { background: #4e5058; color: #fff; }
-  #log { list-style: none; padding: 0; }
-  #log li { padding: 8px 12px; border-radius: 12px; margin: 6px 0; background: #1e1f24; }
-  #log li.heard { background: #2b2d31; text-align: right; }
-  #log li.write { border-left: 3px solid #248046; }
-  form { display: flex; gap: 8px; margin-top: 12px; }
-  input { flex: 1; font: inherit; padding: 12px; border-radius: 12px; border: 1px solid #3a3c42; background: #1e1f24; color: inherit; }
-</style>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Voice">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/icon.png">
+<link rel="stylesheet" href="/app.css">
+<title>Discord Voice</title>
 </head>
 <body>
-<main>
-  <h1>Discord voice</h1>
-  <div class="sub">GPT-Live voice · reads your server · posts as you at once · say "undo" to reverse</div>
+<div class="bg" aria-hidden="true"></div>
 
-  <form id="login" hidden>
-    <input id="code" type="password" placeholder="Access code" autocomplete="current-password">
-    <button type="submit">Sign in</button>
+<!-- Sign in -->
+<main id="login" class="login" hidden>
+  <div class="brand-mark big" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+  <h1>Discord Voice</h1>
+  <p class="muted">Talk to your server. Enter the access code from <code>.local/access-code</code>.</p>
+  <form id="login-form">
+    <input id="code" type="password" placeholder="Access code" autocomplete="current-password" aria-label="Access code">
+    <button type="submit" class="btn primary">Sign in</button>
   </form>
-
-  <section id="app" hidden>
-    <label class="brain">Brain
-      <select id="brain"><option value="A">A · Hermes profile</option><option value="B">B · direct (no Hermes)</option></select>
-    </label>
-    <button id="talk">Start talking</button>
-    <div id="status" role="status"></div>
-    <div id="confirm" hidden>
-      <div id="confirm-text">Waiting for your yes.</div>
-      <p><button class="yes" id="yes">Yes, do it</button><button class="no" id="no">Cancel</button></p>
-    </div>
-    <form id="typed">
-      <input id="say" placeholder="Or type a request">
-      <button type="submit">Send</button>
-    </form>
-    <ul id="log"></ul>
-  </section>
+  <p id="login-error" class="error" role="alert"></p>
 </main>
+
+<!-- App -->
+<div id="app" class="app" hidden>
+  <header class="top">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+      <div>
+        <div class="title">Discord Voice</div>
+        <div class="conn" id="conn"><i></i><span>Ready</span></div>
+      </div>
+    </div>
+    <div class="seg" role="radiogroup" aria-label="Which brain answers">
+      <button type="button" role="radio" data-brain="A" aria-checked="true">Hermes</button>
+      <button type="button" role="radio" data-brain="B" aria-checked="false">Direct</button>
+    </div>
+  </header>
+
+  <section class="feed" id="feed">
+    <div class="empty" id="empty">
+      <h2 class="idle-only">What do you want to know?</h2>
+      <h2 class="call-only">Go ahead, I'm listening</h2>
+      <p class="muted idle-only">Tap the mic and talk, or try one:</p>
+      <p class="muted call-only">Ask about any channel, or say “post&nbsp;in&nbsp;…”. Say “undo” to take it&nbsp;back.</p>
+      <div class="chips grid" role="list">
+        <button type="button" class="chip" data-say="What did I miss?"><svg viewBox="0 0 24 24"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/><path d="M19 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/></svg>What did I miss?</button>
+        <button type="button" class="chip" data-say="What's waiting on me?"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Waiting on me</button>
+        <button type="button" class="chip" data-say="Summarise the support forum"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 21l1.9-5.4A8 8 0 1 1 21 12z"/></svg>Support forum</button>
+        <button type="button" class="chip" data-say="Which rooms were busiest today?"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>Busiest rooms</button>
+      </div>
+    </div>
+    <ol id="log" aria-live="polite"></ol>
+  </section>
+
+  <footer class="dock">
+    <div class="chips row" id="quick" role="list" hidden>
+      <button type="button" class="chip" data-say="What did I miss?">What did I miss?</button>
+      <button type="button" class="chip" data-say="Tell me more">Tell me more</button>
+      <button type="button" class="chip" data-say="Say that again, a bit shorter">Shorter</button>
+      <button type="button" class="chip" data-say="What's waiting on me?">Waiting on me</button>
+    </div>
+
+    <div class="stage">
+
+      <div class="controls">
+        <button type="button" class="round" id="undo" aria-label="Undo last action" disabled>
+          <svg viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>
+          <span>Undo last</span>
+        </button>
+
+        <button type="button" class="mic" id="talk" aria-label="Start talking">
+          <span class="ring r1"></span><span class="ring r2"></span>
+          <span class="core">
+            <svg class="i-mic" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+            <svg class="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+            <span class="spin"></span>
+          </span>
+          <span class="mic-label" id="mic-label">Talk</span>
+        </button>
+
+        <button type="button" class="round" id="mute" aria-label="Mute microphone" aria-pressed="false" disabled>
+          <svg class="i-on" viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          <svg class="i-off" viewBox="0 0 24 24"><path d="M3 3l18 18"/><path d="M15 10V6a3 3 0 0 0-5.7-1.3M9 9v2a3 3 0 0 0 5.1 2.1"/><path d="M5 11a7 7 0 0 0 11.6 5.3M19 11a7 7 0 0 1-.6 2.8M12 18v3"/></svg>
+          <span>Mute</span>
+        </button>
+      </div>
+      <div class="live" aria-live="polite">
+        <div class="live-state" id="state">Tap to talk</div>
+        <div class="live-text" id="heard"></div>
+      </div>
+    </div>
+
+    <form class="typed" id="typed" autocomplete="off">
+      <input id="say" placeholder="Type instead…" aria-label="Type a request" enterkeyhint="send">
+      <button type="submit" class="send" aria-label="Send">
+        <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </button>
+    </form>
+  </footer>
+
+  <!-- Only appears when the server runs with DVC_CONFIRM=1 -->
+  <div class="sheet" id="confirm" hidden role="dialog" aria-labelledby="confirm-text">
+    <div class="sheet-card">
+      <div class="sheet-label">Ready to send</div>
+      <div id="confirm-text" class="sheet-text"></div>
+      <div class="sheet-actions">
+        <button type="button" class="btn ghost" id="no">Cancel</button>
+        <button type="button" class="btn primary" id="yes">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+</div>
+
 <script src="/app.js" type="module"></script>
 </body>
 </html>

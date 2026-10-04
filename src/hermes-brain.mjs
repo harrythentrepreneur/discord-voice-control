@@ -106,7 +106,9 @@ export function createHermesBrain({ discord, ask = askHermes, pendingFile = PEND
   let notes = [];
   const note = (n) => notes.push(n);
 
-  async function handle(utterance) {
+  // allowWrite=false (the turn never asked to post) holds a draft for a yes even when posts are
+  // instant, so a misheard or background sentence can never post as the user.
+  async function handle(utterance, { allowWrite = true } = {}) {
     const text = String(utterance || "").trim().slice(0, 2000);
     if (!text) return { say: "I didn't catch that." };
     if (UNDO.test(text) && !pending) {
@@ -137,7 +139,8 @@ export function createHermesBrain({ discord, ask = askHermes, pendingFile = PEND
     sessionId = r.sessionId || sessionId;
     if (p) {
       pending = p;
-      if (!confirm) return confirmPending(true);
+      if (!confirm && allowWrite) return confirmPending(true);
+      if (!allowWrite) log({ type: "held", tool: p.tool, reason: "turn did not ask to write" });
       return { say: p.summary, pending: p };
     }
     return { say: r.say || "Done." };

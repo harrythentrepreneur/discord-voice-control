@@ -17,6 +17,11 @@ free: catch up while walking, reply to a thread, start a new one, pin a decision
   Posts go out as **you** (your name and avatar, through a webhook the app owns), straight away.
 - **Undo:** say "undo" to reverse the last action: delete the post or thread, remove the reaction,
   unpin, rename back, or delete the new channel.
+- **Ignores background talk:** the mic is open for the whole call, so filler ("mhm", "oh yeah") and
+  people talking in the room are filtered out before they reach the brain (`src/intent.mjs`). A post
+  goes out at once only when you actually asked to post; anything else is held for a "yes".
+- **Short spoken answers:** about 70 words are spoken, then "Want more?". The full answer is in the
+  chat, and "more" reads the rest.
 - **Safe by design:** no deleting other people's messages, no bans, no role or permission changes.
   Text inside Discord messages is treated as data, never as instructions.
 
@@ -112,6 +117,13 @@ the access code.
 
 To keep it running, use a systemd user service (`ExecStart=/usr/bin/node /path/to/src/server.mjs`,
 `Restart=always`).
+
+## The phone page
+
+One big mic button: tap to talk, tap **End** to hang up. **Undo last** reverses the app's last
+action (only enabled when there is one), **Mute** turns your mic off without ending the call.
+Suggestions and a text box cover the times you can't talk. **Hermes / Direct** in the header picks the
+brain for the next call. Add it to your home screen for a full-screen app.
 
 ## Configuration
 

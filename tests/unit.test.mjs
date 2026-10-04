@@ -238,7 +238,7 @@ test("live voice: each answer goes to the delegation of ITS question; a stale an
   app.relay([
     { type: "turn.created", turn: { id: "A", role: "user" } },
     { type: "delegation.created", item: { type: "delegation", id: "dA", user_bidi_turn_id: "A" } },
-    { type: "turn.done", turn: { id: "A", role: "user", transcript: "question A" } },
+    { type: "turn.done", turn: { id: "A", role: "user", transcript: "what is new in thread A" } },
   ]);
   await new Promise((r) => setTimeout(r, 5));
   // the user interrupts with question B before A is answered; GPT-Live drops dA.
@@ -246,19 +246,19 @@ test("live voice: each answer goes to the delegation of ITS question; a stale an
     { type: "error", error: { message: "Unknown delegation item id: dA" } },
     { type: "turn.created", turn: { id: "B", role: "user" } },
     { type: "delegation.created", item: { type: "delegation", id: "dB", user_bidi_turn_id: "B" } },
-    { type: "turn.done", turn: { id: "B", role: "user", transcript: "question B" } },
+    { type: "turn.done", turn: { id: "B", role: "user", transcript: "what is new in thread B" } },
   ]);
-  gates["question A"]();
+  gates["what is new in thread A"]();
   await new Promise((r) => setTimeout(r, 5));
   // A's answer must NOT go to B's delegation.
   assert.equal(app.outbox.length, 1, "A's answer still goes to A's own delegation id");
   assert.equal(app.outbox[0].delegation_item_id, "dA");
   app.outbox.length = 0;
-  gates["question B"]();
+  gates["what is new in thread B"]();
   await app.chain;
   assert.equal(app.outbox.length, 1);
   assert.equal(app.outbox[0].delegation_item_id, "dB");
-  assert.equal(app.outbox[0].content[0].text, "answer to question B");
+  assert.equal(app.outbox[0].content[0].text, "answer to what is new in thread B");
   // A later question C never receives A's or B's text.
   app.relay([
     { type: "turn.created", turn: { id: "C", role: "user" } },
@@ -300,11 +300,11 @@ test("two calls never share state: a second call cannot reset or feed the first"
   const app = createApp({ logFile: null, discord: fakeDiscord(), brain: b1, code: "u".repeat(12) });
   const c1 = app.createCall(b1), c2 = app.createCall(b2);
   c1.relay([{ type: "delegation.created", item: { type: "delegation", id: "d1", user_bidi_turn_id: "T" } }]);
-  c2.relay([{ type: "delegation.created", item: { type: "delegation", id: "d2", user_bidi_turn_id: "T" } }, { type: "turn.done", turn: { id: "T", role: "user", transcript: "hi" } }]);
+  c2.relay([{ type: "delegation.created", item: { type: "delegation", id: "d2", user_bidi_turn_id: "T" } }, { type: "turn.done", turn: { id: "T", role: "user", transcript: "read the hq room" } }]);
   await c2.chain;
   assert.equal(c1.outbox.length, 0);
   assert.equal(c2.outbox[0].delegation_item_id, "d2");
-  assert.equal(c2.outbox[0].content[0].text, "two:hi");
+  assert.equal(c2.outbox[0].content[0].text, "two:read the hq room");
 });
 
 test("brain B (direct): same tools in-process, writes run at once, undo works, no Hermes", async () => {
@@ -327,4 +327,76 @@ test("brain B (direct): same tools in-process, writes run at once, undo works, n
   assert.equal(d.writes[0][2], "hello team");
   assert.match(r.say, /^Posted/);
   assert.match((await b.handle("undo")).say, /took that post down/);
+});
+
+test("background talk and filler never reach the brain; real requests do", async () => {
+  const { classifyTurn } = await import("../src/intent.mjs");
+  // Real phrases from the call log that must be ignored
+  for (const t of ["Hello", "Mhm", "Mm", "Oh, yeah", "Goodbye", "Uh, video", "Um", "Did I break another one", "And she passed away, not in a traditional sense", "No, I think so"])
+    assert.equal(classifyTurn(t).accept, false, t);
+  for (const t of ["What did I miss?", "undo", "what's happening in the discord controller thread", "post in general: shipping tonight", "Summarise the support forum", "tell me more", "any updates", "read the hq room", "What is waiting on me today?"])
+    assert.equal(classifyTurn(t).accept, true, t);
+});
+
+test("an ignored turn gets a silent answer and never calls the brain", async () => {
+  let calls = 0;
+  const brain = { pending: null, reset() {}, handle: async () => { calls++; return { say: "x" }; } };
+  const app = createApp({ logFile: null, discord: fakeDiscord(), brain, code: "t".repeat(12) });
+  app.relay([
+    { type: "delegation.created", item: { type: "delegation", id: "dM", user_bidi_turn_id: "M" } },
+    { type: "turn.done", turn: { id: "M", role: "user", transcript: "Mhm" } },
+  ]);
+  await app.chain;
+  assert.equal(calls, 0);
+  assert.equal(app.outbox.length, 1);
+  assert.equal(app.outbox[0].content[0].text, "");
+  assert.ok(app.log.some((e) => e.type === "ignored" && e.text === "Mhm"));
+});
+
+test("a write the turn never asked for is held for a yes, even with instant posting", async () => {
+  const { createHermesBrain } = await import("../src/hermes-brain.mjs");
+  const fsm = await import("node:fs");
+  const os = await import("node:os");
+  const pf = `${os.tmpdir()}/dvc-pending-hold-${process.pid}.json`;
+  const d = fakeDiscord();
+  const ask = async () => { fsm.writeFileSync(pf, JSON.stringify({ tool: "post_message", args: { channel_id: "2", content: "x" }, summary: "Post x. Send it?" })); return { say: "", sessionId: "s" }; };
+  const b = createHermesBrain({ discord: d, ask, pendingFile: pf, confirm: false });
+  b.reset();
+  const r = await b.handle("what do you think about the launch", { allowWrite: false });
+  assert.equal(d.writes.length, 0, "nothing posted");
+  assert.equal(r.say, "Post x. Send it?");
+  assert.ok(b.pending);
+  const { askedToWrite } = await import("../src/intent.mjs");
+  assert.equal(askedToWrite("post in general: hello"), true);
+  assert.equal(askedToWrite("what do you think about the launch"), false);
+});
+
+test("long answers are spoken in part with 'Want more?'; short ones whole", async () => {
+  const { spokenPart } = await import("../src/server.mjs");
+  const short = "One. Two. Three.";
+  assert.deepEqual(spokenPart(short), { say: short, rest: "" });
+  const long = Array.from({ length: 30 }, (_, i) => `Sentence number ${i} has six words.`).join(" ");
+  const p = spokenPart(long);
+  assert.match(p.say, /Want more\?$/);
+  assert.ok(p.say.split(" ").length <= 75);
+  assert.ok(p.rest.length > 0);
+  assert.equal((p.say.replace(" Want more?", "") + " " + p.rest).replace(/\s+/g, " "), long);
+});
+
+test("yes/no questions count only with a status word", async () => {
+  const { classifyTurn } = await import("../src/intent.mjs");
+  assert.equal(classifyTurn("Is anything waiting on me").accept, true);
+  assert.equal(classifyTurn("Did anyone reply to the customer").accept, true);
+  assert.equal(classifyTurn("Did you put the kettle on").accept, false);
+  assert.equal(classifyTurn("Can you pass the salt").accept, false);
+});
+
+test("follow-ups right after an answer, and yes/no to a draft, always get through", async () => {
+  const { classifyTurn } = await import("../src/intent.mjs");
+  assert.equal(classifyTurn("Do you have anything").accept, false);
+  assert.equal(classifyTurn("Do you have anything", { followUp: true }).accept, true);
+  assert.equal(classifyTurn("No, what do you mean", { followUp: true }).accept, true);
+  assert.equal(classifyTurn("yes", { pending: true }).accept, true);
+  assert.equal(classifyTurn("I broke a glass", { followUp: true }).accept, false);
+  assert.equal(classifyTurn("why do the voice app and the website chat give different answers?").accept, true);
 });

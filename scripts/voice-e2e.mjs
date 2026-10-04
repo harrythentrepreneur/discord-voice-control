@@ -21,13 +21,13 @@ try {
   page.on("response", (r) => { if (r.url().includes("/api/")) events.push(`${r.url().split("/api/")[1]} ${r.status()}`); });
   await page.goto(base);
   await page.fill("#code", code);
-  await page.click("#login button");
+  await page.click("#login-form button");
   await page.waitForSelector("#talk");
-  if (process.env.BRAIN) { await page.selectOption("#brain", process.env.BRAIN); }
+  if (process.env.BRAIN) await page.click(`.seg button[data-brain="${process.env.BRAIN}"]`);
   await page.click("#talk");
-  await page.waitForFunction(() => /Listening|Heard/.test(document.querySelector("#status").textContent), null, { timeout: 30000 });
+  await page.waitForFunction(() => /Listening|Speaking|Checking/.test(document.querySelector("#state").textContent), null, { timeout: 30000 });
   out.connected = true;
-  await page.waitForFunction((n) => document.querySelectorAll("#log li.reply").length >= n, Number(process.env.REPLIES || 1), { timeout: 90000 });
+  await page.waitForFunction((n) => document.querySelectorAll("#log li.msg.bot:not(.thinking)").length >= n, Number(process.env.REPLIES || 1), { timeout: 90000 });
   out.log = await page.$$eval("#log li", (l) => l.map((x) => `${x.className}: ${x.textContent}`).reverse());
   await page.waitForTimeout(Number(process.env.TAIL || 25000));
   out.assistantSpeech = await page.evaluate(() => (window.__said || []).map(([t, txt, muted]) => `${muted ? "MUTED " : "heard "}${txt}`));

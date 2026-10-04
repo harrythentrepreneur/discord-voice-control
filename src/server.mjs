@@ -11,6 +11,7 @@ import { createDiscord } from "./discord.mjs";
 import { createBrain } from "./brain.mjs";
 import { createHermesBrain } from "./hermes-brain.mjs";
 import { createDirectBrain } from "./direct-brain.mjs";
+import { classifyTurn, askedToWrite } from "./intent.mjs";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
@@ -40,6 +41,27 @@ export function fitForSpeech(text, max = 1400) {
   const cut = t.slice(0, max);
   const end = Math.max(cut.lastIndexOf(". "), cut.lastIndexOf("? "), cut.lastIndexOf("! "));
   return end > max / 2 ? cut.slice(0, end + 1) : cut + "…";
+}
+
+// Voice is slow to listen to: speak about 70 words (whole sentences), then offer the rest.
+// The full answer is still shown in the feed; "more" / "tell me more" reads the remainder.
+export function spokenPart(text, maxWords = 70) {
+  const t = String(text).replace(/\s+/g, " ").trim();
+  const words = t.split(" ");
+  if (words.length <= maxWords + 15) return { say: t, rest: "" };
+  const sentences = t.match(/[^.!?]+[.!?]+(?:["”’)]+)?\s*|[^.!?]+$/g) || [t];
+  let say = "";
+  let n = 0;
+  let i = 0;
+  for (; i < sentences.length; i++) {
+    const w = sentences[i].trim().split(" ").length;
+    if (n && n + w > maxWords) break;
+    say += sentences[i];
+    n += w;
+  }
+  const rest = sentences.slice(i).join("").trim();
+  if (!rest) return { say: t, rest: "" };
+  return { say: say.trim() + " Want more?", rest };
 }
 
 function speakable(delegationId, text) {
@@ -84,6 +106,12 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
     ? createBrain({ discord, log: (e) => push(e) })
     : createHermesBrain({ discord, log: (e) => push(e) });
   typedBrain.reset?.();
+  const typedBrains = {};
+  const typedFor = (mode) => {
+    if (injected || mode === "local") return typedBrain;
+    if (!typedBrains[mode]) { typedBrains[mode] = newBrain(mode); typedBrains[mode].reset?.(); }
+    return typedBrains[mode];
+  };
 
   // Answers are paired with the QUESTION they answer, never by arrival order.
   // GPT-Live tags each delegation with the user turn it belongs to (item.user_bidi_turn_id;
@@ -104,8 +132,11 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
   const newBrain = (mode) => (BRAINS[mode] || BRAINS[defaultMode()])();
   let lastCall = null;
 
-  function createCall(callBrain, mode = "A") {
+  function createCall(callBrain, mode = "A", callId = null) {
   const brain = callBrain;
+  let lastDone = null; // tool of the last action this call can undo
+  let moreText = ""; // unspoken remainder of the last long answer
+  let lastAnswerAt = 0; // when the app last gave a real answer (follow-up window)
   const seen = new Set();
   const outbox = [];
   let chain = Promise.resolve();
@@ -123,20 +154,41 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
   }
 
   async function onUserTurn(turnId, said) {
-    push({ type: "heard", text: said, turn: turnId, brain: mode });
+    // Background talk and filler never reach the brain; GPT-Live gets a silent empty answer.
+    const intent = classifyTurn(said, { followUp: Date.now() - lastAnswerAt < 25000, pending: !!brain.pending });
+    if (!intent.accept) {
+      push({ type: "ignored", text: said, turn: turnId, call: callId, reason: intent.reason });
+      answers.set(turnId, "");
+      sendFor(turnId);
+      return;
+    }
+    push({ type: "heard", text: said, turn: turnId, call: callId, brain: mode });
     const t0 = Date.now();
     let r;
+    if (moreText && /^(more|tell me more|go on|continue|keep going|yes|yeah|yes please|sure)\b/i.test(said.trim())) {
+      const part = spokenPart(moreText);
+      moreText = part.rest;
+      push({ type: "reply", text: part.say.replace(/ Want more\?$/, ""), turn: turnId, call: callId, brain: mode, ms: 0, continued: true });
+      answers.set(turnId, part.say);
+      sendFor(turnId);
+      return;
+    }
     try {
-      r = await brain.handle(said);
+      r = await brain.handle(said, { allowWrite: askedToWrite(said) });
     } catch (e) {
       r = { say: e.safe || "Something went wrong reaching the Discord brain. Please try again." };
     }
-    push({ type: "reply", text: r.say, turn: turnId, brain: mode, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null });
-    if (latestTurn && turnId !== latestTurn && !delegsByTurn.has(turnId)) {
-      push({ type: "status", text: "Answer skipped: you had already asked something newer.", turn: turnId });
+    const stale = latestTurn && turnId !== latestTurn && !delegsByTurn.has(turnId);
+    push({ type: "reply", text: r.say, turn: turnId, call: callId, brain: mode, tool: r.action?.tool || null, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null, skipped: stale || undefined });
+    if (r.action?.status === "done") lastDone = r.action.tool === "undo" ? null : r.action.tool;
+    if (stale) {
+      push({ type: "status", text: "Answer skipped: you had already asked something newer.", turn: turnId, call: callId });
       return;
     }
-    answers.set(turnId, r.say);
+    const part = spokenPart(r.say);
+    moreText = part.rest;
+    lastAnswerAt = Date.now();
+    answers.set(turnId, part.say);
     sendFor(turnId);
   }
 
@@ -170,10 +222,10 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
     }
   }
 
-  return { brain, relay, outbox, get chain() { return chain; } };
+  return { brain, mode, relay, outbox, get chain() { return chain; }, get canUndo() { return !!lastDone; }, set lastDone(v) { lastDone = v; } };
   }
 
-  const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
+  const types = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css", ".json": "application/json", ".webmanifest": "application/manifest+json", ".svg": "image/svg+xml", ".png": "image/png" };
 
   async function body(req) {
     let raw = "";
@@ -210,6 +262,7 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
         return send(200, { ok: true }, { "Set-Cookie": `dvc=${code}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000` });
       }
       if (url.pathname.startsWith("/api/")) {
+        if (url.pathname === "/api/session") return send(200, { authed: authed(req) });
         if (!authed(req)) return send(401, { error: "login required" });
         if (req.method === "POST" && url.pathname === "/api/offer") {
           const b = await body(req);
@@ -218,7 +271,7 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           const mode = ["A", "B", "local"].includes(b.brain) ? b.brain : defaultMode();
           const callBrain = injected ? brain : newBrain(mode);
           callBrain.reset?.();
-          const call = createCall(callBrain, mode);
+          const call = createCall(callBrain, mode, callId);
           calls.set(callId, call);
           lastCall = call;
           while (calls.size > 6) calls.delete(calls.keys().next().value);
@@ -231,20 +284,27 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           if (!call) return send(409, { error: "This call has ended. Tap Start talking again." });
           call.relay(Array.isArray(b.events) ? b.events.slice(0, 300) : []);
           if (b.wait) await call.chain;
-          return send(200, { appends: call.outbox.splice(0), log: log.slice(-40), pending: call.brain.pending ? true : false });
+          return send(200, { appends: call.outbox.splice(0), log: log.slice(-60), pending: call.brain.pending ? true : false, canUndo: !!discord.lastAction });
         }
-        if (req.method === "POST" && url.pathname === "/api/ask") {
-          // Typed fallback: same brain, same confirmation rules.
+        if (req.method === "POST" && (url.pathname === "/api/ask" || url.pathname === "/api/undo")) {
+          // Typed request or the Undo button. During a call it goes to THAT call's brain, so it
+          // shares the conversation ("reply there" works); otherwise to a typed brain per A/B mode.
           const b = await body(req);
+          const call = calls.get(String(b.callId || ""));
+          const mode = call?.mode || (["A", "B"].includes(b.brain) ? b.brain : defaultMode());
+          const tb = call?.brain || typedFor(mode);
+          const text = url.pathname === "/api/undo" ? "undo" : String(b.text || "").slice(0, 2000);
+          const t0 = Date.now();
           let r;
           try {
-            r = await typedBrain.handle(String(b.text || ""));
+            r = await tb.handle(text);
           } catch (e) {
             r = { say: e.safe || "Something went wrong." };
           }
-          push({ type: "heard", text: String(b.text || "") });
-          push({ type: "reply", text: r.say, pending: r.pending?.summary || null, action: r.action?.status || null });
-          return send(200, { say: r.say, log: log.slice(-40), pending: !!typedBrain.pending });
+          const device = String(b.device || "").slice(0, 40) || undefined;
+          push({ type: "heard", text, typed: true, brain: mode, device, call: call ? String(b.callId) : undefined });
+          push({ type: "reply", text: r.say, brain: mode, device, call: call ? String(b.callId) : undefined, ms: Date.now() - t0, words: r.say.split(/\s+/).filter(Boolean).length, pending: r.pending?.summary || null, action: r.action?.status || null, tool: r.action?.tool || null });
+          return send(200, { say: r.say, log: log.slice(-60), pending: !!tb.pending, canUndo: !!discord.lastAction });
         }
         if (req.method === "POST" && url.pathname === "/api/confirm") {
           const b = await body(req);
@@ -260,7 +320,7 @@ export function createApp({ discord = createDiscord(), brain, typedBrain, liveCa
           return send(200, { ok: true });
         }
         if (req.method === "GET" && url.pathname === "/api/state")
-          return send(200, { log: log.slice(-40), pending: false });
+          return send(200, { log: log.slice(-60), pending: false, canUndo: !!discord.lastAction });
         return send(404, { error: "not found" });
       }
       const file = url.pathname === "/" ? "/index.html" : url.pathname;
