@@ -23,6 +23,7 @@ try {
   await page.fill("#code", code);
   await page.click("#login button");
   await page.waitForSelector("#talk");
+  if (process.env.BRAIN) { await page.selectOption("#brain", process.env.BRAIN); }
   await page.click("#talk");
   await page.waitForFunction(() => /Listening|Heard/.test(document.querySelector("#status").textContent), null, { timeout: 30000 });
   out.connected = true;
