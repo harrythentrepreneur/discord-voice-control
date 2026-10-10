@@ -516,7 +516,7 @@ test("V2: request status is honest (working vs replied vs done) and phone text h
   assert.ok(isProgress("⏳ Working — 6 min — iteration 21/800, terminal"));
   assert.ok(isProgress("📚 Reading skill whatsapp-ad-conversion-optimisation"));
   assert.ok(!isProgress("RapidWorksheet was paused on 30 Sep."));
-  const t = cleanForPhone("Here is the plan.\n```\ncd /home/harry/x\n```\n(×2)\n📚 Reading skill baker\nsaved to /home/harry/.hermes/a.json ok");
+  const t = cleanForPhone("Here is the plan.\n```\ncd /home/user/x\n```\n(×2)\n📚 Reading skill baker\nsaved to /home/user/.agent/a.json ok");
   assert.ok(!/```|\/home\/|Reading skill|×2/.test(t), t);
   assert.match(t, /Here is the plan\./);
 });
